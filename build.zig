@@ -3,6 +3,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Compile shaders
+    const shaders = .{
+        .{ "shaders/basic.vert.hlsl", "basic.vert.spv", "vs_6_0" },
+        .{ "shaders/basic.frag.hlsl", "basic.frag.spv", "ps_6_0" },
+    };
+    const shader_step = b.step("shaders", "Compile HLSL shaders");
+    inline for (shaders) |s| {
+        const cmd = b.addSystemCommand(&.{
+            "dxc",                             "-spirv",
+            "-T",                              s[2],
+            "-E",                              "main",
+            s[0],                              "-Fo",
+            b.pathJoin(&.{ "shaders", s[1] }),
+        });
+        shader_step.dependOn(&cmd.step);
+    }
+
     const lib_mod = b.addModule("rhodo", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -19,6 +36,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+
+    sandbox.step.dependOn(shader_step);
+
     const sdl3 = b.dependency("sdl3", .{
         .target = target,
         .optimize = optimize,
