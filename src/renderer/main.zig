@@ -74,7 +74,7 @@ const Renderer = struct {
     command_pool: vk.CommandPool,
     command_buffers: [config.max_frames_in_flight]vk.CommandBuffer,
 
-    image_available: [config.max_frames_in_flight]vk.Semaphore,
+    image_available: []vk.Semaphore,
     render_finished: [config.max_frames_in_flight]vk.Semaphore,
     in_flight: [config.max_frames_in_flight]vk.Fence,
 
@@ -147,8 +147,9 @@ fn initVulkan() !void {
 fn deinitVulkan() void {
     renderer.device.deviceWaitIdle() catch {};
 
+    for (renderer.image_available) |s| renderer.device.destroySemaphore(s, null);
+    allocator.free(renderer.image_available);
     for (0..config.max_frames_in_flight) |i| {
-        renderer.device.destroySemaphore(renderer.image_available[i], null);
         renderer.device.destroySemaphore(renderer.render_finished[i], null);
         renderer.device.destroyFence(renderer.in_flight[i], null);
     }
@@ -644,8 +645,11 @@ fn recordCommandBuffer(cmd: vk.CommandBuffer, image_index: u32) !void {
 
 // Sync objects
 fn createSyncObjects() !void {
+    renderer.image_available = try allocator.alloc(vk.Semaphore, renderer.swapchain_images.len);
+    for (renderer.image_available) |*s| {
+        s.* = try renderer.device.createSemaphore(&.{}, null);
+    }
     for (0..config.max_frames_in_flight) |i| {
-        renderer.image_available[i] = try renderer.device.createSemaphore(&.{}, null);
         renderer.render_finished[i] = try renderer.device.createSemaphore(&.{}, null);
 
         renderer.in_flight[i] = try renderer.device.createFence(
@@ -663,10 +667,12 @@ fn drawFrame() !void {
     _ = try renderer.device.waitForFences(&.{renderer.in_flight[f]}, .true, std.math.maxInt(u64));
     try renderer.device.resetFences(&.{renderer.in_flight[f]});
 
+    const acquire_semaphore = renderer.image_available[f % renderer.image_available.len];
+
     const acquired = try renderer.device.acquireNextImageKHR(
         renderer.swapchain,
         std.math.maxInt(u64),
-        renderer.image_available[f],
+        acquire_semaphore,
         .null_handle,
     );
     const image_index = acquired.image_index;
@@ -679,10 +685,10 @@ fn drawFrame() !void {
 
     const submit_info: vk.SubmitInfo = .{
         .wait_semaphore_count = 1,
-        .p_wait_semaphores = @ptrCast(&renderer.image_available[f]),
+        .p_wait_semaphores = &.{acquire_semaphore},
         .p_wait_dst_stage_mask = @ptrCast(&wait_stage),
         .command_buffer_count = 1,
-        .p_command_buffers = @ptrCast(&cmd),
+        .p_command_buffers = &.{cmd},
         .signal_semaphore_count = 1,
         .p_signal_semaphores = @ptrCast(&renderer.render_finished[f]),
     };
