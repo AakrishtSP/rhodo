@@ -1,2 +1,3 @@
 const std = @import("std");
-pub const renderer = @import("renderer/main.zig");
+pub const Renderer = @import("renderer/main.zig").Renderer;
+pub const mesh = @import("renderer/mesh.zig");
