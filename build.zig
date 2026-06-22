@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     const shaders = .{
         .{ "shaders/basic.vert.hlsl", "basic.vert.spv", "vs_6_0" },
         .{ "shaders/basic.frag.hlsl", "basic.frag.spv", "ps_6_0" },
+        .{ "shaders/mesh.vert.hlsl", "mesh.vert.spv", "vs_6_0" },
+        .{ "shaders/mesh.frag.hlsl", "mesh.frag.spv", "ps_6_0" },
     };
     const shader_step = b.step("shaders", "Compile HLSL shaders");
     inline for (shaders) |s| {
