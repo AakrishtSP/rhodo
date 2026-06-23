@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const Vec4 = struct { x: f32, y: f32, z: f32, w: f32 };
+
 pub const Vec3 = struct {
     x: f32,
     y: f32,
@@ -74,10 +76,10 @@ pub const Mat4 = struct {
         const s = f.cross(up).normalize();
         const u = s.cross(f);
         return .{ .m = .{
-            s.x,           u.x,           -f.x,         0,
-            s.y,           u.y,           -f.y,         0,
-            s.z,           u.z,           -f.z,         0,
-            -s.dot(eye),   -u.dot(eye),   f.dot(eye),  1,
+            s.x,         u.x,         -f.x,       0,
+            s.y,         u.y,         -f.y,       0,
+            s.z,         u.z,         -f.z,       0,
+            -s.dot(eye), -u.dot(eye), f.dot(eye), 1,
         } };
     }
 
@@ -85,10 +87,10 @@ pub const Mat4 = struct {
         const c = @cos(a);
         const s = @sin(a);
         return .{ .m = .{
-            c,  0, -s, 0,
-            0,  1, 0,  0,
-            s,  0, c,  0,
-            0,  0, 0,  1,
+            c, 0, -s, 0,
+            0, 1, 0,  0,
+            s, 0, c,  0,
+            0, 0, 0,  1,
         } };
     }
 };

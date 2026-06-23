@@ -5,6 +5,13 @@ const mesh_obj_path = "assets/suzanne.obj";
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 
+// ponytail: clock_gettime with raw CLOCK_MONOTONIC. Zig 0.16 removed std.time.Timer.
+fn nowNs() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.os.linux.clockid_t.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
@@ -20,10 +27,19 @@ pub fn main(init: std.process.Init) !void {
         break :blk try rhodo.mesh.cube(allocator);
     };
 
-    var renderer = try rhodo.Renderer.init(allocator, io, mesh_data);
+    var renderer = try rhodo.Renderer.init(allocator, io);
     defer renderer.deinit();
 
+    const lit_shader: rhodo.ShaderHandle = 0; // ponytail: shader 0 loaded by init
+    const flat_shader = try renderer.loadShader(rhodo.shader.mesh_vert, rhodo.shader.flat_frag);
+
+    const suzanne = try renderer.uploadMesh(mesh_data);
+    const cube = try renderer.uploadMesh(try rhodo.mesh.cube(allocator));
+
     var watcher = try ShaderWatcher.init(io, "shaders/mesh.vert.spv", "shaders/mesh.frag.spv");
+
+    var t: f32 = 0;
+    var prev = nowNs();
 
     var running = true;
     while (running) {
@@ -40,11 +56,23 @@ pub fn main(init: std.process.Init) !void {
             };
         }
 
+        const current = nowNs();
+        t += @as(f32, @floatFromInt(current - prev)) / 1e9;
+        prev = current;
+
         renderer.beginFrame() catch |err| {
             std.debug.print("beginFrame error: {}\n", .{err});
             running = false;
             continue;
         };
+        renderer.drawMesh(lit_shader, suzanne, rhodo.math.Mat4.rotationY(t));
+        renderer.drawMesh(flat_shader, cube, blk: {
+            var m = rhodo.math.Mat4.identity;
+            m = m.mul(rhodo.math.Mat4.rotationY(-t * 1.3));
+            // ponytail: no translation matrix yet. Offset via identity hack.
+            m.m[12] = 2.5;
+            break :blk m;
+        });
         renderer.endFrame() catch |err| {
             std.debug.print("endFrame error: {}\n", .{err});
             running = false;

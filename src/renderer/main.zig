@@ -10,8 +10,6 @@ const mesh = @import("mesh.zig");
 const math = @import("../math.zig");
 
 const max_frames_in_flight: u32 = 2;
-const default_vert_path = "shaders/mesh.vert.spv";
-const default_frag_path = "shaders/mesh.frag.spv";
 
 // Vertex layout + push constant for the mesh pipeline. pos at offset 0, normal
 // after it; one 64-byte vertex-stage push constant for the MVP matrix.
@@ -42,6 +40,28 @@ const mesh_config: pipeline_mod.Config = .{
 // No vk.* type appears in any of these five signatures on purpose — that's
 // what keeps the engine loop free of Vulkan, and is the seam a future backend
 // swap would replace, if one is ever needed.
+pub const MeshHandle = u32;
+pub const ShaderHandle = u32;
+
+const MeshEntry = struct {
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+    index_count: u32,
+};
+
+const ShaderEntry = struct {
+    pipeline: Pipeline,
+    vert_path: []const u8,
+    frag_path: []const u8,
+};
+
+// Built-in shader paths. Callers use these with loadShader.
+pub const shader = struct {
+    pub const mesh_vert = "shaders/mesh.vert.spv";
+    pub const lit_frag = "shaders/mesh.frag.spv";
+    pub const flat_frag = "shaders/flat.frag.spv";
+};
+
 pub const Renderer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -49,11 +69,14 @@ pub const Renderer = struct {
 
     ctx: Context,
     swapchain: Swapchain,
-    pipeline: Pipeline,
 
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
-    index_count: u32,
+    // ponytail: ceiling 8 shaders. Grow when needed.
+    shaders: [8]ShaderEntry = undefined,
+    shader_count: u32 = 0,
+
+    // ponytail: ceiling 64 meshes. ArrayList when needed.
+    meshes: [64]MeshEntry = undefined,
+    mesh_count: u32 = 0,
 
     command_pool: vk.CommandPool,
     command_buffers: [max_frames_in_flight]vk.CommandBuffer,
@@ -68,17 +91,15 @@ pub const Renderer = struct {
     current_frame: u32,
     current_image_index: u32,
     framebuffer_resized: bool,
-    vert_path: []const u8,
-    frag_path: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, mesh_data: mesh.Mesh) !Renderer {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
         self.io = io;
         self.current_frame = 0;
         self.framebuffer_resized = false;
-        self.vert_path = default_vert_path;
-        self.frag_path = default_frag_path;
+        self.shader_count = 0;
+        self.mesh_count = 0;
 
         try sdl.init(.{ .video = true });
         errdefer sdl.shutdown();
@@ -96,16 +117,10 @@ pub const Renderer = struct {
         self.swapchain = try Swapchain.init(&self.ctx, self.window);
         errdefer self.swapchain.deinit(&self.ctx);
 
-        self.pipeline = try Pipeline.init(&self.ctx, io, self.swapchain.format, self.vert_path, self.frag_path, mesh_config);
-        errdefer self.pipeline.deinit(&self.ctx);
+        _ = try self.loadShader(shader.mesh_vert, shader.lit_frag);
+        errdefer for (self.shaders[0..self.shader_count]) |*s| s.pipeline.deinit(&self.ctx);
 
-        try self.uploadMesh(mesh_data);
-        errdefer {
-            self.vertex_buffer.deinit(&self.ctx);
-            self.index_buffer.deinit(&self.ctx);
-        }
-
-        try self.swapchain.buildFramebuffers(&self.ctx, self.pipeline.render_pass);
+        try self.swapchain.buildFramebuffers(&self.ctx, self.shaders[0].pipeline.render_pass);
 
         try self.createCommandPool();
         try self.createCommandBuffers();
@@ -128,9 +143,11 @@ pub const Renderer = struct {
         }
         self.ctx.device.destroyCommandPool(self.command_pool, null);
 
-        self.vertex_buffer.deinit(&self.ctx);
-        self.index_buffer.deinit(&self.ctx);
-        self.pipeline.deinit(&self.ctx);
+        for (self.meshes[0..self.mesh_count]) |*entry| {
+            entry.vertex_buffer.deinit(&self.ctx);
+            entry.index_buffer.deinit(&self.ctx);
+        }
+        for (self.shaders[0..self.shader_count]) |*s| s.pipeline.deinit(&self.ctx);
         self.swapchain.deinit(&self.ctx);
         self.ctx.deinit();
 
@@ -154,7 +171,7 @@ pub const Renderer = struct {
             .null_handle,
         ) catch |err| switch (err) {
             error.OutOfDateKHR => {
-                try self.swapchain.recreate(&self.ctx, self.window, self.pipeline.render_pass);
+                try self.swapchain.recreate(&self.ctx, self.window, self.shaders[0].pipeline.render_pass);
                 return self.beginFrame();
             },
             else => return err,
@@ -186,22 +203,12 @@ pub const Renderer = struct {
             .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
         };
         self.ctx.device.cmdBeginRenderPass(cmd, &.{
-            .render_pass = self.pipeline.render_pass,
+            .render_pass = self.shaders[0].pipeline.render_pass,
             .framebuffer = self.swapchain.framebuffers[self.current_image_index],
             .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain.extent },
             .clear_value_count = clears.len,
             .p_clear_values = &clears,
         }, .@"inline");
-        self.ctx.device.cmdBindPipeline(cmd, .graphics, self.pipeline.handle);
-
-        // ponytail: the scene (one spinning mesh) is baked in here — there's no
-        // scene/draw API yet and nothing to hand one. Upgrade path is a
-        // drawMesh(handle, transform) surface once there's a second object.
-        const mvp = self.computeMvp();
-        self.ctx.device.cmdPushConstants(cmd, self.pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &mvp);
-        self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{self.vertex_buffer.handle}, &.{0});
-        self.ctx.device.cmdBindIndexBuffer(cmd, self.index_buffer.handle, 0, .uint32);
-        self.ctx.device.cmdDrawIndexed(cmd, self.index_count, 1, 0, 0, 0);
     }
 
     // End the render pass, submit, and present. Handles OutOfDateKHR / resize
@@ -239,7 +246,7 @@ pub const Renderer = struct {
 
         if (self.framebuffer_resized) {
             self.framebuffer_resized = false;
-            try self.swapchain.recreate(&self.ctx, self.window, self.pipeline.render_pass);
+            try self.swapchain.recreate(&self.ctx, self.window, self.shaders[0].pipeline.render_pass);
         }
 
         self.current_frame = (f + 1) % max_frames_in_flight;
@@ -282,37 +289,59 @@ pub const Renderer = struct {
     // new shader source; if the new shaders fail to compile, the old pipeline
     // keeps running and the error is returned to the caller to report.
     pub fn reloadShaders(self: *Renderer, vert_path: []const u8, frag_path: []const u8) !void {
-        try self.pipeline.reload(&self.ctx, self.io, vert_path, frag_path);
-        self.vert_path = vert_path;
-        self.frag_path = frag_path;
+        // ponytail: reload shader 0 only. Per-handle reload when shader playground needs it.
+        try self.shaders[0].pipeline.reload(&self.ctx, self.io, vert_path, frag_path);
+        self.shaders[0].vert_path = vert_path;
+        self.shaders[0].frag_path = frag_path;
     }
 
-    // Upload caller-supplied mesh data to GPU buffers, then free the CPU copy.
-    // ponytail: upgrade path — GPU buffers own the data; caller deinits the Mesh.
-    fn uploadMesh(self: *Renderer, m: mesh.Mesh) !void {
+    pub fn loadShader(self: *Renderer, vert_path: []const u8, frag_path: []const u8) !ShaderHandle {
+        const handle: ShaderHandle = self.shader_count;
+        self.shaders[handle] = .{
+            .pipeline = try Pipeline.init(&self.ctx, self.io, self.swapchain.format, vert_path, frag_path, mesh_config),
+            .vert_path = vert_path,
+            .frag_path = frag_path,
+        };
+        self.shader_count += 1;
+        return handle;
+    }
+
+    pub fn uploadMesh(self: *Renderer, m: mesh.Mesh) !MeshHandle {
         defer m.deinit(self.allocator);
 
-        self.vertex_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .vertex_buffer_bit = true }, mesh.Vertex, m.vertices);
-        errdefer self.vertex_buffer.deinit(&self.ctx);
-        self.index_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .index_buffer_bit = true }, u32, m.indices);
-        self.index_count = @intCast(m.indices.len);
+        const handle: MeshHandle = self.mesh_count;
+        self.meshes[handle] = .{
+            .vertex_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .vertex_buffer_bit = true }, mesh.Vertex, m.vertices),
+            .index_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .index_buffer_bit = true }, u32, m.indices),
+            .index_count = @intCast(m.indices.len),
+        };
+        self.mesh_count += 1;
+        return handle;
     }
 
-    // MVP for this frame: spin the model on Y over time, fixed camera, perspective
-    // sized to the current swapchain aspect. Transposed because HLSL's
-    // mul(mvp, v) reads the matrix row-major.
-    fn computeMvp(self: *Renderer) math.Mat4 {
-        const angle = @as(f32, @floatFromInt(sdl.c.SDL_GetTicks())) * 0.001;
+    // ponytail: immediate-mode, no draw list. Pipeline bound per-call.
+    // Upgrade: sort by pipeline when you have many draw calls.
+    pub fn drawMesh(self: *Renderer, sh: ShaderHandle, handle: MeshHandle, transform: math.Mat4) void {
+        const cmd = self.command_buffers[self.current_frame];
+        const entry = self.meshes[handle];
+        const pipeline = self.shaders[sh].pipeline;
+
+        self.ctx.device.cmdBindPipeline(cmd, .graphics, pipeline.handle);
+
         const aspect = @as(f32, @floatFromInt(self.swapchain.extent.width)) /
             @as(f32, @floatFromInt(self.swapchain.extent.height));
-        const model = math.Mat4.rotationY(angle);
         const view = math.Mat4.lookAt(
             .{ .x = 0, .y = 0, .z = 4 },
             .{ .x = 0, .y = 0, .z = 0 },
             .{ .x = 0, .y = 1, .z = 0 },
         );
         const proj = math.Mat4.perspective(std.math.pi / 4.0, aspect, 0.1, 100.0);
-        return proj.mul(view).mul(model);
+        const mvp = proj.mul(view).mul(transform);
+
+        self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &mvp);
+        self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});
+        self.ctx.device.cmdBindIndexBuffer(cmd, entry.index_buffer.handle, 0, .uint32);
+        self.ctx.device.cmdDrawIndexed(cmd, entry.index_count, 1, 0, 0, 0);
     }
 
     fn createCommandPool(self: *Renderer) !void {
