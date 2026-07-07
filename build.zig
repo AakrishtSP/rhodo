@@ -27,6 +27,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    lib_mod.link_libc = true;
+    lib_mod.addIncludePath(b.path("vendor/cgltf"));
+    lib_mod.addCSourceFile(.{
+        .file = b.path("vendor/cgltf/cgltf_impl.c"),
+        .flags = &.{},
+    });
 
     const sandbox = b.addExecutable(.{
         .name = "rhodo",

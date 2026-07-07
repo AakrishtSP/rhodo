@@ -1,4 +1,7 @@
 const std = @import("std");
+const cgltf = @cImport({
+    @cInclude("cgltf.h");
+});
 
 pub const Vertex = struct {
     pos: [3]f32,
@@ -15,58 +18,64 @@ pub const Mesh = struct {
     }
 };
 
-// Minimal Wavefront OBJ: v, vn, f. Faces are fan-triangulated (handles tris,
-// quads, n-gons). Each unique v//vn pair becomes one vertex (deduped). vt is
-// ignored — no UVs on the mesh path yet. ponytail: no materials/smoothing
-// groups; add when a model needs them.
-pub fn loadObj(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Mesh {
-    const src = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
-    defer allocator.free(src);
-    return parseObj(allocator, src);
-}
+// cgltf (vendor/cgltf) — single-header glTF 2.0 parser. This is the only
+// mesh format the engine loads now; the OBJ/tiny_obj_c path is gone.
+//
+// ponytail: concatenates every primitive of every mesh in the file into one
+// Mesh, ignoring node transforms/hierarchy entirely. Correct for a single
+// exported object (Blender "export selected", one mesh). A multi-node scene
+// (several positioned instances, or a rig) needs the node graph walked with
+// cgltf_node_transform_world per node — upgrade here when a glTF with more
+// than one entry in data.nodes shows up.
+pub fn loadGltf(allocator: std.mem.Allocator, path: [:0]const u8) !Mesh {
+    var options: cgltf.cgltf_options = std.mem.zeroes(cgltf.cgltf_options);
+    var data: ?*cgltf.cgltf_data = null;
 
-pub fn parseObj(allocator: std.mem.Allocator, src: []const u8) !Mesh {
-    var positions: std.ArrayList([3]f32) = .empty;
-    defer positions.deinit(allocator);
-    var normals: std.ArrayList([3]f32) = .empty;
-    defer normals.deinit(allocator);
+    if (cgltf.cgltf_parse_file(&options, path.ptr, &data) != cgltf.cgltf_result_success) {
+        return error.GltfParseFailed;
+    }
+    defer cgltf.cgltf_free(data);
+
+    if (cgltf.cgltf_load_buffers(&options, data, path.ptr) != cgltf.cgltf_result_success) {
+        return error.GltfLoadBuffersFailed;
+    }
 
     var vertices: std.ArrayList(Vertex) = .empty;
     errdefer vertices.deinit(allocator);
     var indices: std.ArrayList(u32) = .empty;
     errdefer indices.deinit(allocator);
 
-    // "p//n" key -> emitted vertex index, so shared corners reuse one vertex.
-    var seen: std.StringHashMap(u32) = .init(allocator);
-    defer {
-        var it = seen.keyIterator();
-        while (it.next()) |k| allocator.free(k.*);
-        seen.deinit();
-    }
+    var mi: usize = 0;
+    while (mi < data.?.meshes_count) : (mi += 1) {
+        const mesh = data.?.meshes[mi];
+        var pi: usize = 0;
+        while (pi < mesh.primitives_count) : (pi += 1) {
+            const prim = &mesh.primitives[pi];
+            const pos_acc = cgltf.cgltf_find_accessor(prim, cgltf.cgltf_attribute_type_position, 0) orelse continue;
+            const norm_acc = cgltf.cgltf_find_accessor(prim, cgltf.cgltf_attribute_type_normal, 0);
 
-    var lines = std.mem.tokenizeScalar(u8, src, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \r\t");
-        if (line.len == 0 or line[0] == '#') continue;
-
-        var tok = std.mem.tokenizeAny(u8, line, " \t");
-        const tag = tok.next() orelse continue;
-
-        if (std.mem.eql(u8, tag, "v")) {
-            try positions.append(allocator, try readVec3(&tok));
-        } else if (std.mem.eql(u8, tag, "vn")) {
-            try normals.append(allocator, try readVec3(&tok));
-        } else if (std.mem.eql(u8, tag, "f")) {
-            // Collect this face's corner-vertex indices, then fan-triangulate.
-            var face: std.ArrayList(u32) = .empty;
-            defer face.deinit(allocator);
-            while (tok.next()) |corner| {
-                const idx = try resolveCorner(allocator, corner, positions.items, normals.items, &vertices, &seen);
-                try face.append(allocator, idx);
+            const base: u32 = @intCast(vertices.items.len);
+            var vi: usize = 0;
+            while (vi < pos_acc.*.count) : (vi += 1) {
+                var vert: Vertex = .{ .pos = .{ 0, 0, 0 }, .normal = .{ 0, 0, 0 } };
+                _ = cgltf.cgltf_accessor_read_float(pos_acc, vi, &vert.pos[0], 3);
+                if (norm_acc) |na| _ = cgltf.cgltf_accessor_read_float(na, vi, &vert.normal[0], 3);
+                try vertices.append(allocator, vert);
             }
-            if (face.items.len < 3) return error.DegenerateFace;
-            for (1..face.items.len - 1) |i| {
-                try indices.appendSlice(allocator, &.{ face.items[0], face.items[i], face.items[i + 1] });
+
+            if (prim.indices) |idx_acc| {
+                var ii: usize = 0;
+                while (ii < idx_acc.*.count) : (ii += 1) {
+                    const idx = cgltf.cgltf_accessor_read_index(idx_acc, ii);
+                    try indices.append(allocator, base + @as(u32, @intCast(idx)));
+                }
+            } else {
+                // Non-indexed primitive: cgltf doesn't synthesize indices,
+                // so number the verts we just appended sequentially.
+                var ii: usize = 0;
+                while (ii < pos_acc.*.count) : (ii += 1) {
+                    try indices.append(allocator, base + @as(u32, @intCast(ii)));
+                }
             }
         }
     }
@@ -77,49 +86,7 @@ pub fn parseObj(allocator: std.mem.Allocator, src: []const u8) !Mesh {
     };
 }
 
-fn readVec3(tok: *std.mem.TokenIterator(u8, .any)) ![3]f32 {
-    var v: [3]f32 = undefined;
-    for (&v) |*c| c.* = try std.fmt.parseFloat(f32, tok.next() orelse return error.BadVertex);
-    return v;
-}
-
-// "p/t/n" (t and n optional). 1-based, negative = relative-from-end.
-fn resolveCorner(
-    allocator: std.mem.Allocator,
-    corner: []const u8,
-    positions: []const [3]f32,
-    normals: []const [3]f32,
-    vertices: *std.ArrayList(Vertex),
-    seen: *std.StringHashMap(u32),
-) !u32 {
-    var parts = std.mem.splitScalar(u8, corner, '/');
-    const p_str = parts.next() orelse return error.BadFace;
-    _ = parts.next(); // skip vt
-    const n_str = parts.next();
-
-    if (seen.get(corner)) |existing| return existing;
-
-    const p_idx = try objIndex(p_str, positions.len);
-    var vert: Vertex = .{ .pos = positions[p_idx], .normal = .{ 0, 0, 0 } };
-    if (n_str) |ns| if (ns.len > 0) {
-        vert.normal = normals[try objIndex(ns, normals.len)];
-    };
-
-    const new_idx: u32 = @intCast(vertices.items.len);
-    try vertices.append(allocator, vert);
-    try seen.put(try allocator.dupe(u8, corner), new_idx);
-    return new_idx;
-}
-
-fn objIndex(s: []const u8, count: usize) !usize {
-    const raw = try std.fmt.parseInt(i64, s, 10);
-    if (raw > 0) return @intCast(raw - 1);
-    if (raw < 0) return @intCast(@as(i64, @intCast(count)) + raw);
-    return error.ZeroIndex;
-}
-
-// Unit cube, 24 verts (per-face normals), 36 indices. Fallback when the obj
-// file is missing so the renderer always has something to draw.
+// Unit cube, unchanged — pure Zig, no library involved.
 pub fn cube(allocator: std.mem.Allocator) !Mesh {
     const faces = [_]struct { n: [3]f32, q: [4][3]f32 }{
         .{ .n = .{ 0, 0, 1 }, .q = .{ .{ -1, -1, 1 }, .{ 1, -1, 1 }, .{ 1, 1, 1 }, .{ -1, 1, 1 } } },
@@ -140,17 +107,30 @@ pub fn cube(allocator: std.mem.Allocator) !Mesh {
     return .{ .vertices = verts, .indices = indices };
 }
 
-test "parse one-triangle obj" {
-    const obj =
-        \\v 0 0 0
-        \\v 1 0 0
-        \\v 0 1 0
-        \\vn 0 0 1
-        \\f 1//1 2//1 3//1
+// One runnable check: a self-contained glTF (positions embedded as a base64
+// data URI, non-indexed triangle) exercises cgltf_parse + cgltf_load_buffers
+// + cgltf_find_accessor + cgltf_accessor_read_float — the same calls
+// loadGltf makes — without touching disk.
+test "cgltf parses an embedded one-triangle glTF" {
+    const doc =
+        \\{"asset":{"version":"2.0"},
+        \\"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}],
+        \\"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36}],
+        \\"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}],
+        \\"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
     ;
-    const m = try parseObj(std.testing.allocator, obj);
-    defer m.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 3), m.vertices.len);
-    try std.testing.expectEqual(@as(usize, 3), m.indices.len);
-    try std.testing.expectEqual(@as(f32, 1), m.vertices[1].pos[0]);
+    var options: cgltf.cgltf_options = std.mem.zeroes(cgltf.cgltf_options);
+    var data: ?*cgltf.cgltf_data = null;
+    try std.testing.expectEqual(cgltf.cgltf_result_success, cgltf.cgltf_parse(&options, doc.ptr, doc.len, &data));
+    defer cgltf.cgltf_free(data);
+    try std.testing.expectEqual(cgltf.cgltf_result_success, cgltf.cgltf_load_buffers(&options, data, null));
+
+    try std.testing.expectEqual(@as(usize, 1), data.?.meshes_count);
+    const prim = &data.?.meshes[0].primitives[0];
+    const pos_acc = cgltf.cgltf_find_accessor(prim, cgltf.cgltf_attribute_type_position, 0).?;
+    try std.testing.expectEqual(@as(usize, 3), pos_acc.*.count);
+
+    var p: [3]f32 = undefined;
+    _ = cgltf.cgltf_accessor_read_float(pos_acc, 1, &p[0], 3);
+    try std.testing.expectEqual([3]f32{ 1, 0, 0 }, p);
 }
