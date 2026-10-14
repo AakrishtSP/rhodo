@@ -14,6 +14,7 @@ pub const BodyHandle = u32;
 pub const Physics = struct {
     ids: [1024]u32 = undefined,
     halfs: [1024]math.Vec3 = undefined,
+    alive: [1024]bool = .{false} ** 1024,
     count: u32 = 0,
 
     pub fn init() !void {
@@ -33,6 +34,7 @@ pub const Physics = struct {
         const handle = self.count;
         self.ids[handle] = id;
         self.halfs[handle] = half;
+        self.alive[handle] = true;
         self.count += 1;
         return handle;
     }
@@ -42,13 +44,15 @@ pub const Physics = struct {
     }
 
     pub fn removeBox(self: *Physics, handle: BodyHandle) void {
+        if (!self.alive[handle]) return;
         C.Jolt_RemoveBox(self.ids[handle]);
         self.ids[handle] = 0xFFFFFFFF;
+        self.alive[handle] = false;
     }
 
-    pub fn sync(self: *Physics, transforms: []math.Transform, alive: []const bool) void {
+    pub fn sync(self: *Physics, transforms: []math.Transform) void {
         for (0..self.count) |i| {
-            if (!alive[i]) continue;
+            if (!self.alive[i]) continue;
             var p: [3]f32 = undefined;
             var q: [4]f32 = undefined;
             C.Jolt_GetTransform(self.ids[i], &p, &q);
@@ -77,15 +81,13 @@ test "box falls, rests, and removes cleanly" {
         false,
     );
     var transforms: [4]math.Transform = undefined;
-    var alive = [_]bool{ true, true, false, false };
     var i: u32 = 0;
     while (i < 300) : (i += 1) {
         Physics.step(1.0 / 60.0);
-        sim.sync(transforms[0..], alive[0..]);
+        sim.sync(transforms[0..]);
     }
     try std.testing.expectApproxEqAbs(@as(f32, 1), transforms[box].pos.y, 0.05);
     sim.removeBox(box);
-    alive[box] = false;
     Physics.step(1.0 / 60.0);
-    sim.sync(transforms[0..], alive[0..]); // skips dead, no crash
+    sim.sync(transforms[0..]); // skips dead, no crash
 }

@@ -93,22 +93,14 @@ World space. No-op when empty.
 - `removeBox(handle)` — Jolt remove + destroy (tombstone; slots leak until
   restart resets all).
 - `step(dt)` — variable dt (clamped by caller); no fixed timestep.
-- `sync(transforms, alive)` — writes pos/quat/scale (`scale = half` so
-  the −1..1 cube mesh matches), skipping dead. No velocity setters, no
-  contacts, no other shapes.
+- `sync(transforms)` — writes pos/quat/scale (`scale = half` so
+  the −1..1 cube mesh matches), skipping removed bodies internally. No
+  velocity setters, no contacts, no other shapes.
 
-## Entities (`src/entity.zig`)
-
-Data-oriented game objects: every entity is exactly one box body + optional
-visual — parallel arrays (`models[]`, `is_static[]`, `alive[]`) keyed by
-stable index, no pointers, no methods on entities. Reuses `transforms[]` and
-`Physics` (entity id = body/transform index; all bodies spawn through here).
-- `spawn(sim, pos, half, is_static, model: ?Model) !Entity` — mesh + body
-  composed in one call (the per-type constructors in game code are the
-  Godot-like composition point).
-- `despawn(sim, id)`, `reset()`. No reuse (see removal note above).
-- Draw by iterating `0..count`, skipping dead. Non-physical entities need an
-  id↔body map (add when triggers/markers arrive).
+Game objects are per-type structs over these registries (e.g. a `Prop`
+`{body, model, hitbox}` with a `spawn` constructor + `drawable()` accessor),
+not engine entities — behavior state (HP, cooldowns) lives with the struct,
+shared aspects (transforms, meshes, bodies) stay flat and index-addressed.
 
 ## Audio (`src/audio.zig`)
 
