@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     lib_mod.link_libc = true;
+    lib_mod.link_libcpp = true;
     lib_mod.addIncludePath(b.path("vendor/cgltf"));
     lib_mod.addCSourceFile(.{
         .file = b.path("vendor/cgltf/cgltf_impl.c"),
@@ -42,6 +43,23 @@ pub fn build(b: *std.Build) void {
         .file = b.path("vendor/stb/stb_impl.c"),
         .flags = &.{},
     });
+
+    // Jolt Physics (vendor/jolt/Jolt, file list in vendor/jolt/sources.zig).
+    // Excludes Jolt/Renderer/ (its debug renderer; hitboxes go through debug
+    // geometry instead). ponytail: ~150 files is a one-time compile, cached
+    // after. C++17, no exceptions/RTTI (Jolt uses neither).
+    lib_mod.addIncludePath(b.path("vendor/jolt"));
+    {
+        const jolt_sources = @import("vendor/jolt/sources.zig").files;
+        const jolt_flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti" };
+        for (jolt_sources) |f| {
+            lib_mod.addCSourceFile(.{
+                .file = b.path(b.pathJoin(&.{ "vendor/jolt", f })),
+                .flags = jolt_flags,
+            });
+        }
+        lib_mod.addCSourceFile(.{ .file = b.path("vendor/jolt/jolt_shim.cpp"), .flags = jolt_flags });
+    }
 
     const sandbox = b.addExecutable(.{
         .name = "rhodo",

@@ -2,6 +2,10 @@ const std = @import("std");
 
 pub const Vec4 = struct { x: f32, y: f32, z: f32, w: f32 };
 
+// Rigid transform: world position, unit quaternion (x, y, z, w), scale.
+// Physics writes these; Mat4.fromTransform composes them for rendering.
+pub const Transform = struct { pos: Vec3, rot: Vec4, scale: Vec3 };
+
 pub const Vec3 = struct {
     x: f32,
     y: f32,
@@ -130,6 +134,33 @@ pub const Mat4 = struct {
         m.m[15] = 1.0;
         return m;
     }
+
+    // Compose translation * rotation * scale from a Transform. rot is a unit
+    // quaternion (x, y, z, w); columns are scaled so M = T*R*S.
+    pub fn fromTransform(t: Transform) Mat4 {
+        const qx = t.rot.x;
+        const qy = t.rot.y;
+        const qz = t.rot.z;
+        const qw = t.rot.w;
+        const xx = qx * qx;
+        const yy = qy * qy;
+        const zz = qz * qz;
+        const xy = qx * qy;
+        const xz = qx * qz;
+        const yz = qy * qz;
+        const wx = qw * qx;
+        const wy = qw * qy;
+        const wz = qw * qz;
+        const sx = t.scale.x;
+        const sy = t.scale.y;
+        const sz = t.scale.z;
+        return .{ .m = .{
+            (1 - 2 * (yy + zz)) * sx, 2 * (xy + wz) * sx,     2 * (xz - wy) * sx,     0,
+            2 * (xy - wz) * sy,       (1 - 2 * (xx + zz)) * sy, 2 * (yz + wx) * sy,     0,
+            2 * (xz + wy) * sz,       2 * (yz - wx) * sz,       (1 - 2 * (xx + yy)) * sz, 0,
+            t.pos.x,                  t.pos.y,                  t.pos.z,                  1,
+        } };
+    }
 };
 
 test "identity mul round-trips" {
@@ -147,4 +178,25 @@ test "orthographic maps corners to clip edges" {
     try std.testing.expectApproxEqAbs(@as(f32, -1), o.m[12], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), o.m[13], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1), o.m[15], 1e-6);
+}
+
+test "fromTransform composes T*R*S" {
+    const t = Transform{
+        .pos = .{ .x = 1, .y = 2, .z = 3 },
+        .rot = .{ .x = 0, .y = 0, .z = 0, .w = 1 },
+        .scale = .{ .x = 2, .y = 2, .z = 2 },
+    };
+    const got = Mat4.fromTransform(t);
+    const want = Mat4.translate(1, 2, 3).mul(Mat4.scale(2, 2, 2));
+    for (got.m, want.m) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-6);
+
+    // 90 degrees about Y maps +X to -Z, matching rotationY.
+    const h = @sqrt(@as(f32, 0.5));
+    const r = Mat4.fromTransform(.{
+        .pos = .{ .x = 0, .y = 0, .z = 0 },
+        .rot = .{ .x = 0, .y = h, .z = 0, .w = h },
+        .scale = .{ .x = 1, .y = 1, .z = 1 },
+    });
+    const want_r = Mat4.rotationY(std.math.pi / 2.0);
+    for (r.m, want_r.m) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-5);
 }
