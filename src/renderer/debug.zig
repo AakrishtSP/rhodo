@@ -71,14 +71,52 @@ pub const DebugDraw = struct {
     }
 
     pub fn aabb(self: *DebugDraw, min: math.Vec3, max: math.Vec3, color: math.Vec3) void {
-        const c000 = math.Vec3{ .x = min.x, .y = min.y, .z = min.z };
-        const c100 = math.Vec3{ .x = max.x, .y = min.y, .z = min.z };
-        const c110 = math.Vec3{ .x = max.x, .y = max.y, .z = min.z };
-        const c010 = math.Vec3{ .x = min.x, .y = max.y, .z = min.z };
-        const c001 = math.Vec3{ .x = min.x, .y = min.y, .z = max.z };
-        const c101 = math.Vec3{ .x = max.x, .y = min.y, .z = max.z };
-        const c111 = math.Vec3{ .x = max.x, .y = max.y, .z = max.z };
-        const c011 = math.Vec3{ .x = min.x, .y = max.y, .z = max.z };
+        self.wire(
+            .{ .x = min.x, .y = min.y, .z = min.z },
+            .{ .x = max.x, .y = min.y, .z = min.z },
+            .{ .x = max.x, .y = max.y, .z = min.z },
+            .{ .x = min.x, .y = max.y, .z = min.z },
+            .{ .x = min.x, .y = min.y, .z = max.z },
+            .{ .x = max.x, .y = min.y, .z = max.z },
+            .{ .x = max.x, .y = max.y, .z = max.z },
+            .{ .x = min.x, .y = max.y, .z = max.z },
+            color,
+        );
+    }
+
+    // Oriented box gizmo: the true rotated edges (vs aabb's world bounds).
+    pub fn obb(self: *DebugDraw, pos: math.Vec3, rot: math.Vec4, half: math.Vec3, color: math.Vec3) void {
+        const hx = math.Vec3{ .x = half.x, .y = 0, .z = 0 };
+        const hy = math.Vec3{ .x = 0, .y = half.y, .z = 0 };
+        const hz = math.Vec3{ .x = 0, .y = 0, .z = half.z };
+        const px = hx.rotateByQuat(rot);
+        const py = hy.rotateByQuat(rot);
+        const pz = hz.rotateByQuat(rot);
+        self.wire(
+            pos.sub(px).sub(py).sub(pz),
+            pos.add(px).sub(py).sub(pz),
+            pos.add(px).add(py).sub(pz),
+            pos.sub(px).add(py).sub(pz),
+            pos.sub(px).sub(py).add(pz),
+            pos.add(px).sub(py).add(pz),
+            pos.add(px).add(py).add(pz),
+            pos.sub(px).add(py).add(pz),
+            color,
+        );
+    }
+
+    fn wire(
+        self: *DebugDraw,
+        c000: math.Vec3,
+        c100: math.Vec3,
+        c110: math.Vec3,
+        c010: math.Vec3,
+        c001: math.Vec3,
+        c101: math.Vec3,
+        c111: math.Vec3,
+        c011: math.Vec3,
+        color: math.Vec3,
+    ) void {
         self.line(c000, c100, color);
         self.line(c100, c110, color);
         self.line(c110, c010, color);
@@ -123,4 +161,17 @@ test "aabb emits 12 edges and overflow is dropped" {
         .{ .x = 1, .y = 0, .z = 0 },
     );
     try std.testing.expectEqual(@as(u32, max_verts), d.count);
+}
+
+test "obb with identity rotation matches aabb corners" {
+    var d = DebugDraw{ .pipeline = undefined, .buffer = undefined, .count = 0 };
+    d.obb(
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 0, .y = 0, .z = 0, .w = 1 },
+        .{ .x = 1, .y = 1, .z = 1 },
+        .{ .x = 0, .y = 1, .z = 1 },
+    );
+    try std.testing.expectEqual(@as(u32, 24), d.count);
+    try std.testing.expectEqual(math.Vec3{ .x = -1, .y = -1, .z = -1 }, d.verts[0].pos);
+    try std.testing.expectEqual(math.Vec3{ .x = 1, .y = -1, .z = -1 }, d.verts[1].pos);
 }

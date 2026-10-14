@@ -37,6 +37,7 @@ Keyboard + mouse:
 - `W`/`A`/`S`/`D` — move
 - `Space` / `Shift` — move up / down
 - `F` — drop a box
+- `G` — cycle hitbox view: AABB / OBB gizmo / off
 - Mouse — look (captured while the window has focus)
 - `Escape` — release / recapture the mouse cursor
 - Close the window — quit
@@ -47,6 +48,7 @@ Gamepad (first connected pad; hot-plug supported):
 - Right stick — look
 - `R1` (RB) / `L1` (LB) — move up / down
 - `X` (cross/south) — drop a box
+- `△` (triangle/north) — cycle hitbox view
 
 ## Notes
 

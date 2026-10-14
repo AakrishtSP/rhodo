@@ -381,7 +381,7 @@ pub const Renderer = struct {
     // SDL's full scancode/button sets only if you need free rebinding.
     pub const KeyCode = enum {
         // keyboard scancodes
-        w, a, s, d, f, space, left_shift, escape,
+        w, a, s, d, f, g, space, left_shift, escape,
         // gamepad buttons (SDL positional; PS4 = south:cross, east:circle, west:square, north:triangle)
         pad_south, pad_east, pad_west, pad_north,
         pad_dpad_up, pad_dpad_down, pad_dpad_left, pad_dpad_right,
@@ -476,6 +476,7 @@ pub const Renderer = struct {
             .s => .s,
             .d => .d,
             .f => .f,
+            .g => .g,
             .space => .space,
             .left_shift => .left_shift,
             .escape => .escape,
@@ -580,6 +581,10 @@ pub const Renderer = struct {
 
     pub fn drawAabb(self: *Renderer, min: math.Vec3, max: math.Vec3, color: math.Vec3) void {
         self.debug.aabb(min, max, color);
+    }
+
+    pub fn drawObb(self: *Renderer, pos: math.Vec3, rot: math.Vec4, half: math.Vec3, color: math.Vec3) void {
+        self.debug.obb(pos, rot, half, color);
     }
 
     // Upload an RGBA image as a sampled texture. One descriptor set per

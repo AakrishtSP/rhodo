@@ -30,6 +30,12 @@ pub const Vec3 = struct {
     pub fn dot(a: Vec3, b: Vec3) f32 {
         return a.x * b.x + a.y * b.y + a.z * b.z;
     }
+    // Rotate v by unit quaternion q (x, y, z, w).
+    pub fn rotateByQuat(v: Vec3, q: Vec4) Vec3 {
+        const qv = Vec3{ .x = q.x, .y = q.y, .z = q.z };
+        const t = qv.cross(v).scale(2);
+        return v.add(t.scale(q.w)).add(qv.cross(t));
+    }
     pub fn normalize(a: Vec3) Vec3 {
         const len = @sqrt(a.dot(a));
         if (len == 0) return a;
@@ -135,6 +141,40 @@ pub const Mat4 = struct {
         return m;
     }
 
+    // World-space AABB of a box with center pos, unit-quaternion rot (x,y,z,w),
+    // and half extents half. Tight even when rotated (unlike pos +/- half):
+    // each world half-extent sums the absolute rotated local axes.
+    pub fn orientedBoxAabb(pos: Vec3, rot: Vec4, half: Vec3) struct { min: Vec3, max: Vec3 } {
+        const qx = rot.x;
+        const qy = rot.y;
+        const qz = rot.z;
+        const qw = rot.w;
+        const xx = qx * qx;
+        const yy = qy * qy;
+        const zz = qz * qz;
+        const xy = qx * qy;
+        const xz = qx * qz;
+        const yz = qy * qz;
+        const wx = qw * qx;
+        const wy = qw * qy;
+        const wz = qw * qz;
+        const r00 = 1 - 2 * (yy + zz);
+        const r01 = 2 * (xy - wz);
+        const r02 = 2 * (xz + wy);
+        const r10 = 2 * (xy + wz);
+        const r11 = 1 - 2 * (xx + zz);
+        const r12 = 2 * (yz - wx);
+        const r20 = 2 * (xz - wy);
+        const r21 = 2 * (yz + wx);
+        const r22 = 1 - 2 * (xx + yy);
+        const wh = Vec3{
+            .x = @abs(r00) * half.x + @abs(r01) * half.y + @abs(r02) * half.z,
+            .y = @abs(r10) * half.x + @abs(r11) * half.y + @abs(r12) * half.z,
+            .z = @abs(r20) * half.x + @abs(r21) * half.y + @abs(r22) * half.z,
+        };
+        return .{ .min = pos.sub(wh), .max = pos.add(wh) };
+    }
+
     // Compose translation * rotation * scale from a Transform. rot is a unit
     // quaternion (x, y, z, w); columns are scaled so M = T*R*S.
     pub fn fromTransform(t: Transform) Mat4 {
@@ -199,4 +239,38 @@ test "fromTransform composes T*R*S" {
     });
     const want_r = Mat4.rotationY(std.math.pi / 2.0);
     for (r.m, want_r.m) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-5);
+}
+
+test "orientedBoxAabb is tight when rotated" {
+    const id = Vec4{ .x = 0, .y = 0, .z = 0, .w = 1 };
+    const a = Mat4.orientedBoxAabb(
+        .{ .x = 1, .y = 2, .z = 3 },
+        id,
+        .{ .x = 1, .y = 2, .z = 3 },
+    );
+    try std.testing.expectEqual(Vec3{ .x = 0, .y = 0, .z = 0 }, a.min);
+    try std.testing.expectEqual(Vec3{ .x = 2, .y = 4, .z = 6 }, a.max);
+
+    // 90 degrees about Y swaps x/z extents.
+    const h = @sqrt(@as(f32, 0.5));
+    const b = Mat4.orientedBoxAabb(
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 0, .y = h, .z = 0, .w = h },
+        .{ .x = 1, .y = 2, .z = 3 },
+    );
+    try std.testing.expectApproxEqAbs(@as(f32, -3), b.min.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -2), b.min.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), b.min.z, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3), b.max.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2), b.max.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), b.max.z, 1e-5);
+}
+
+test "rotateByQuat turns +X to -Z on 90deg Y" {
+    const h = @sqrt(@as(f32, 0.5));
+    const v = Vec3{ .x = 1, .y = 0, .z = 0 };
+    const got = v.rotateByQuat(.{ .x = 0, .y = h, .z = 0, .w = h });
+    try std.testing.expectApproxEqAbs(@as(f32, 0), got.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), got.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), got.z, 1e-5);
 }
