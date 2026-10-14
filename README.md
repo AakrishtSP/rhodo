@@ -36,6 +36,7 @@ Keyboard + mouse:
 
 - `W`/`A`/`S`/`D` — move
 - `Space` / `Shift` — move up / down
+- `F` — drop a box
 - Mouse — look (captured while the window has focus)
 - `Escape` — release / recapture the mouse cursor
 - Close the window — quit
@@ -45,6 +46,7 @@ Gamepad (first connected pad; hot-plug supported):
 - Left stick / D-pad — move
 - Right stick — look
 - `R1` (RB) / `L1` (LB) — move up / down
+- `X` (cross/south) — drop a box
 
 ## Notes
 

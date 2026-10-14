@@ -381,7 +381,7 @@ pub const Renderer = struct {
     // SDL's full scancode/button sets only if you need free rebinding.
     pub const KeyCode = enum {
         // keyboard scancodes
-        w, a, s, d, space, left_shift, escape,
+        w, a, s, d, f, space, left_shift, escape,
         // gamepad buttons (SDL positional; PS4 = south:cross, east:circle, west:square, north:triangle)
         pad_south, pad_east, pad_west, pad_north,
         pad_dpad_up, pad_dpad_down, pad_dpad_left, pad_dpad_right,
@@ -475,6 +475,7 @@ pub const Renderer = struct {
             .a => .a,
             .s => .s,
             .d => .d,
+            .f => .f,
             .space => .space,
             .left_shift => .left_shift,
             .escape => .escape,

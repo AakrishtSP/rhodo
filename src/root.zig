@@ -9,6 +9,7 @@ pub const mesh = @import("renderer/mesh.zig");
 pub const math = @import("math.zig");
 pub const Camera = @import("camera.zig").Camera;
 pub const Physics = @import("physics.zig").Physics;
+pub const BodyHandle = @import("physics.zig").BodyHandle;
 
 pub const Transform = math.Transform;
 pub var transforms: [1024]Transform = undefined;
