@@ -10,6 +10,8 @@ pub fn build(b: *std.Build) void {
         .{ "shaders/mesh.vert.hlsl", "mesh.vert.spv", "vs_6_0" },
         .{ "shaders/mesh.frag.hlsl", "mesh.frag.spv", "ps_6_0" },
         .{ "shaders/flat.frag.hlsl", "flat.frag.spv", "ps_6_0" },
+        .{ "shaders/line.vert.hlsl", "line.vert.spv", "vs_6_0" },
+        .{ "shaders/line.frag.hlsl", "line.frag.spv", "ps_6_0" },
     };
     const shader_step = b.step("shaders", "Compile HLSL shaders");
     inline for (shaders) |s| {

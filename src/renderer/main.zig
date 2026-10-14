@@ -9,6 +9,7 @@ const Buffer = @import("vk/buffer.zig").Buffer;
 const mesh = @import("mesh.zig");
 const math = @import("../math.zig");
 const Camera = @import("../camera.zig").Camera;
+const DebugDraw = @import("debug.zig").DebugDraw;
 
 const max_frames_in_flight: u32 = 2;
 
@@ -102,6 +103,9 @@ pub const Renderer = struct {
     // Bound once per frame via setCamera; folded into each draw's MVP.
     camera: Camera = .{},
 
+    // CPU line list, flushed automatically at endFrame (depth off, drawn last).
+    debug: DebugDraw,
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
@@ -133,6 +137,9 @@ pub const Renderer = struct {
         _ = try self.loadShader(shader.mesh_vert, shader.lit_frag);
         errdefer for (self.shaders[0..self.shader_count]) |*s| s.pipeline.deinit(&self.ctx);
 
+        self.debug = try DebugDraw.init(&self.ctx, self.io, self.swapchain.format);
+        errdefer self.debug.deinit(&self.ctx);
+
         try self.swapchain.buildFramebuffers(&self.ctx, self.shaders[0].pipeline.render_pass);
 
         try self.createCommandPool();
@@ -162,6 +169,7 @@ pub const Renderer = struct {
             entry.index_buffer.deinit(&self.ctx);
         }
         for (self.shaders[0..self.shader_count]) |*s| s.pipeline.deinit(&self.ctx);
+        self.debug.deinit(&self.ctx);
         self.swapchain.deinit(&self.ctx);
         self.ctx.deinit();
 
@@ -230,6 +238,8 @@ pub const Renderer = struct {
     pub fn endFrame(self: *Renderer) !void {
         const f = self.current_frame;
         const cmd = self.command_buffers[f];
+
+        try self.debug.flush(&self.ctx, cmd, self.viewProj());
 
         self.ctx.device.cmdEndRenderPass(cmd);
         try self.ctx.device.endCommandBuffer(cmd);
@@ -458,14 +468,28 @@ pub const Renderer = struct {
 
         self.ctx.device.cmdBindPipeline(cmd, .graphics, pipeline.handle);
 
-        const aspect = @as(f32, @floatFromInt(self.swapchain.extent.width)) /
-            @as(f32, @floatFromInt(self.swapchain.extent.height));
-        const mvp = self.camera.projection(aspect).mul(self.camera.view()).mul(transform);
+        const mvp = self.viewProj().mul(transform);
 
         self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &mvp);
         self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});
         self.ctx.device.cmdBindIndexBuffer(cmd, entry.index_buffer.handle, 0, .uint32);
         self.ctx.device.cmdDrawIndexed(cmd, entry.index_count, 1, 0, 0, 0);
+    }
+
+    // Fire-and-forget debug lines in world space, flushed automatically at
+    // endFrame (depth off, drawn last so always visible).
+    pub fn drawLine(self: *Renderer, a: math.Vec3, b: math.Vec3, color: math.Vec3) void {
+        self.debug.line(a, b, color);
+    }
+
+    pub fn drawAabb(self: *Renderer, min: math.Vec3, max: math.Vec3, color: math.Vec3) void {
+        self.debug.aabb(min, max, color);
+    }
+
+    fn viewProj(self: *Renderer) math.Mat4 {
+        const aspect = @as(f32, @floatFromInt(self.swapchain.extent.width)) /
+            @as(f32, @floatFromInt(self.swapchain.extent.height));
+        return self.camera.projection(aspect).mul(self.camera.view());
     }
 
     fn createCommandPool(self: *Renderer) !void {
