@@ -15,6 +15,7 @@ void Jolt_Shutdown(void);
 
 // Add an axis-aligned box. Returns the Jolt body id, or 0xFFFFFFFF on failure.
 uint32_t Jolt_AddBox(const float pos[3], const float half_extent[3], bool is_static);
+void Jolt_RemoveBox(uint32_t id);
 void Jolt_Step(float dt);
 // Body transform: world position + unit quaternion (x, y, z, w).
 void Jolt_GetTransform(uint32_t id, float out_pos[3], float out_quat[4]);

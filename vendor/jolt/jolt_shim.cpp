@@ -121,6 +121,12 @@ void Jolt_Step(float dt) {
     physics->Update(dt, 1, temp_alloc, job_system);
 }
 
+void Jolt_RemoveBox(uint32_t id) {
+    BodyInterface &bi = physics->GetBodyInterface();
+    bi.RemoveBody(BodyID(id));
+    bi.DestroyBody(BodyID(id));
+}
+
 void Jolt_GetTransform(uint32_t id, float out_pos[3], float out_quat[4]) {
     BodyInterface &bi = physics->GetBodyInterface();
     RVec3 p = bi.GetPosition(BodyID(id));

@@ -13,6 +13,10 @@ pub const math = @import("math.zig");
 pub const Camera = @import("camera.zig").Camera;
 pub const Physics = @import("physics.zig").Physics;
 pub const BodyHandle = @import("physics.zig").BodyHandle;
+pub const Entities = @import("entity.zig").Entities;
+pub const Entity = @import("entity.zig").Entity;
+pub const Audio = @import("audio.zig").Audio;
+pub const SoundHandle = @import("audio.zig").SoundHandle;
 pub const imgui = @import("imgui.zig").imgui;
 
 pub const Transform = math.Transform;

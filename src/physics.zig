@@ -1,3 +1,4 @@
+const std = @import("std");
 const math = @import("math.zig");
 const C = @cImport({
     @cInclude("jolt_shim.h");
@@ -40,8 +41,14 @@ pub const Physics = struct {
         C.Jolt_Step(dt);
     }
 
-    pub fn sync(self: *Physics, transforms: []math.Transform) void {
+    pub fn removeBox(self: *Physics, handle: BodyHandle) void {
+        C.Jolt_RemoveBox(self.ids[handle]);
+        self.ids[handle] = 0xFFFFFFFF;
+    }
+
+    pub fn sync(self: *Physics, transforms: []math.Transform, alive: []const bool) void {
         for (0..self.count) |i| {
+            if (!alive[i]) continue;
             var p: [3]f32 = undefined;
             var q: [4]f32 = undefined;
             C.Jolt_GetTransform(self.ids[i], &p, &q);
@@ -53,3 +60,32 @@ pub const Physics = struct {
         }
     }
 };
+
+// Headless end-to-end: static floor + falling box lands at y=1, removal skips.
+test "box falls, rests, and removes cleanly" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+    _ = try sim.addBox(
+        .{ .x = 0, .y = -1, .z = 0 },
+        .{ .x = 10, .y = 1, .z = 10 },
+        true,
+    );
+    const box = try sim.addBox(
+        .{ .x = 0, .y = 5, .z = 0 },
+        .{ .x = 1, .y = 1, .z = 1 },
+        false,
+    );
+    var transforms: [4]math.Transform = undefined;
+    var alive = [_]bool{ true, true, false, false };
+    var i: u32 = 0;
+    while (i < 300) : (i += 1) {
+        Physics.step(1.0 / 60.0);
+        sim.sync(transforms[0..], alive[0..]);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 1), transforms[box].pos.y, 0.05);
+    sim.removeBox(box);
+    alive[box] = false;
+    Physics.step(1.0 / 60.0);
+    sim.sync(transforms[0..], alive[0..]); // skips dead, no crash
+}
