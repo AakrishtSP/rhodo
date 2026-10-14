@@ -2,6 +2,7 @@ const std = @import("std");
 pub const Renderer = @import("renderer/main.zig").Renderer;
 pub const MeshHandle = @import("renderer/main.zig").MeshHandle;
 pub const ShaderHandle = @import("renderer/main.zig").ShaderHandle;
+pub const TextureHandle = @import("renderer/main.zig").TextureHandle;
 pub const KeyCode = @import("renderer/main.zig").Renderer.KeyCode;
 pub const Event = @import("renderer/main.zig").Renderer.Event;
 pub const shader = @import("renderer/main.zig").shader;
