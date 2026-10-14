@@ -51,10 +51,14 @@ inside the render pass (before `endFrame`); debug lines flush automatically at
   Frees the CPU `Mesh` after upload.
 - `drawMesh(shader, mesh, transform: Mat4)` — unlit/custom pipelines (flat
   ground). `drawMeshTinted(mesh, color: Vec4, transform)` / `drawModel(model,
-  transform)` — lit + RGBA tint via shader 0 (80B MVP+color push). `Model =
-  { mesh, color }` bundles both; `texture` and skeletal/keyframe runtime join
-  when a textured/animated glTF arrives (physics + procedural cover motion).
+  transform)` — lit + RGBA tint via shader 0 (96B MVP+color+light push).
+  `Model = { mesh, color }` bundles both; `texture` and skeletal/keyframe
+  runtime join when a textured/animated glTF arrives (physics + procedural
+  cover motion).
 - `setCamera(cam: Camera)` — binds once per frame; all draws fold it in.
+- `setLight(dir: Vec3, ambient: f32)` — scene sun bound like the camera
+  (direction normalized, ambient clamped 0..1); folded into lit draws.
+  One directional only; point lights + fog arrive with atmosphere work.
 - `Camera` (`src/camera.zig`) — `pos`, `yaw`/`pitch` (radians), `fov_y`,
   `near=0.1`, `far=100`. `forward()`, `view()`, `projection(aspect)`.
 - `rhodo.transforms: [1024]Transform` — physics writes here; render with

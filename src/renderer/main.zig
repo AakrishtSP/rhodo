@@ -41,10 +41,11 @@ const mesh_attributes = [_]vk.VertexInputAttributeDescription{
     .{ .location = 1, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(mesh.Vertex, "normal") },
 };
 const mesh_push = [_]vk.PushConstantRange{.{
-    // 64B MVP + 16B tint color. Vertex reads MVP, fragment reads color.
+    // 64B MVP + 16B tint + 16B light (dir xyz, ambient w). Vertex reads MVP,
+    // fragment reads tint + light.
     .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
     .offset = 0,
-    .size = @sizeOf(math.Mat4) + @sizeOf(math.Vec4),
+    .size = @sizeOf(math.Mat4) + @sizeOf(math.Vec4) * 2,
 }};
 const mesh_config: pipeline_mod.Config = .{
     .bindings = &mesh_bindings,
@@ -69,7 +70,7 @@ pub const TextureHandle = @import("sprite.zig").TextureHandle;
 // physics + procedural motion cover all current movement.
 pub const Model = struct { mesh: MeshHandle, color: math.Vec4 };
 
-const LitPush = struct { mvp: math.Mat4, color: math.Vec4 };
+const LitPush = struct { mvp: math.Mat4, color: math.Vec4, light: math.Vec4 };
 
 const MeshEntry = struct {
     vertex_buffer: Buffer,
@@ -125,6 +126,12 @@ pub const Renderer = struct {
     // Bound once per frame via setCamera; folded into each draw's MVP.
     camera: Camera = .{},
 
+    // Scene sun (direction to light + ambient), bound via setLight and folded
+    // into lit draws like the camera. ponytail: one directional only; point
+    // lights + fog arrive with atmosphere work, not before.
+    light_dir: math.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
+    light_ambient: f32 = 0.2,
+
     // CPU line list, flushed automatically at endFrame (depth off, drawn last).
     debug: DebugDraw,
 
@@ -157,6 +164,7 @@ pub const Renderer = struct {
         self.framebuffer_resized = false;
         self.camera = .{};
         self.watched_count = 0;
+        self.setLight(.{ .x = 0.5, .y = 0.8, .z = 0.6 }, 0.2);
         self.shader_count = 0;
         self.mesh_count = 0;
 
@@ -350,6 +358,15 @@ pub const Renderer = struct {
         self.camera = cam;
     }
 
+    // Bind the scene sun. Direction is normalized, ambient clamped 0..1.
+    pub fn setLight(self: *Renderer, dir: math.Vec3, ambient: f32) void {
+        const len = @sqrt(dir.dot(dir));
+        if (len > 0) {
+            self.light_dir = dir.scale(1.0 / len);
+        }
+        self.light_ambient = std.math.clamp(ambient, 0, 1);
+    }
+
     // Toggle OS mouse capture: cursor hidden, relative motion only. Needed to
     // steer a mouse-look camera, and the escape hatch back to a normal cursor.
     pub fn setMouseCapture(self: *Renderer, enabled: bool) !void {
@@ -498,7 +515,11 @@ pub const Renderer = struct {
 
         self.ctx.device.cmdBindPipeline(cmd, .graphics, pipeline.handle);
 
-        const push = LitPush{ .mvp = self.viewProj().mul(transform), .color = color };
+        const push = LitPush{
+            .mvp = self.viewProj().mul(transform),
+            .color = color,
+            .light = .{ .x = self.light_dir.x, .y = self.light_dir.y, .z = self.light_dir.z, .w = self.light_ambient },
+        };
         self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(LitPush), &push);
         self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});
         self.ctx.device.cmdBindIndexBuffer(cmd, entry.index_buffer.handle, 0, .uint32);

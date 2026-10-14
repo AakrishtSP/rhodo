@@ -10,12 +10,13 @@ struct PSInput {
 struct {
     float4x4 mvp;
     float4 color;
+    float4 light; // xyz = direction (to sun), w = ambient 0..1
 } pc;
 
 float4 main(PSInput input) : SV_Target {
     float3 n = normalize(input.normal);
-    float3 light = normalize(float3(0.5, 0.8, 0.6));
+    float3 light = normalize(pc.light.xyz);
     float diffuse = max(dot(n, light), 0.0);
-    float shade = 0.2 + 0.8 * diffuse;
+    float shade = pc.light.w + (1.0 - pc.light.w) * diffuse;
     return float4(shade.xxx, 1.0) * pc.color;
 }
