@@ -69,14 +69,15 @@ World space. No-op when empty.
 - `drawObb(pos, quat, half, color)` — 12 edges of the true rotated box.
 - Ceiling 8192 lines; overflow silently dropped; no sorting.
 
-## 2D sprites + textures (`src/renderer/texture.zig`)
+## 2D sprites + textures (`src/renderer/sprite.zig`, `texture.zig`)
 
 - `loadTexture(path: [:0]u8) !TextureHandle` — stb_image (forced RGBA) into a
   sampled `R8G8B8A8_SRGB` optimal image (staging + layout transitions), linear
   clamp sampler, one combined-image-sampler descriptor set. Ceiling 32.
 - `drawSprite(tex, transform: Mat4)` — shared unit quad (UV origin top-left),
   screen space (orthographic, top-left origin, pixels). Blend on, depth off.
-  One draw call per sprite, no batching.
+  One draw call per sprite, no batching. Sub-rectangles (spritesheets) need a
+  UV-rect push — not yet implemented, see below.
 - `Mat4.orthographic(l, r, b, t, n, f)` — Vulkan clip (Y-flipped like
   `perspective`, depth 0..1). `translate`/`scale` compose sprite placement:
   `translate(x, y, 0).mul(scale(w, h, 1))` maps the quad to a `w×h` rect.
