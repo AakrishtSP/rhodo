@@ -49,8 +49,11 @@ inside the render pass (before `endFrame`); debug lines flush automatically at
   (unlit white). Shader 0 (`mesh_vert`+`lit_frag`) is loaded by `init`.
 - `uploadMesh(mesh.Mesh) !MeshHandle` — host-visible vertex+index buffers.
   Frees the CPU `Mesh` after upload.
-- `drawMesh(shader, mesh, transform: Mat4)` — one call per mesh, pipeline
-  bound per call. MVP = camera `viewProj * transform`, pushed (64B).
+- `drawMesh(shader, mesh, transform: Mat4)` — unlit/custom pipelines (flat
+  ground). `drawMeshTinted(mesh, color: Vec4, transform)` / `drawModel(model,
+  transform)` — lit + RGBA tint via shader 0 (80B MVP+color push). `Model =
+  { mesh, color }` bundles both; `texture` and skeletal/keyframe runtime join
+  when a textured/animated glTF arrives (physics + procedural cover motion).
 - `setCamera(cam: Camera)` — binds once per frame; all draws fold it in.
 - `Camera` (`src/camera.zig`) — `pos`, `yaw`/`pitch` (radians), `fov_y`,
   `near=0.1`, `far=100`. `forward()`, `view()`, `projection(aspect)`.

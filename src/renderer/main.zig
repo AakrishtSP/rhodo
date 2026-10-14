@@ -41,9 +41,10 @@ const mesh_attributes = [_]vk.VertexInputAttributeDescription{
     .{ .location = 1, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(mesh.Vertex, "normal") },
 };
 const mesh_push = [_]vk.PushConstantRange{.{
-    .stage_flags = .{ .vertex_bit = true },
+    // 64B MVP + 16B tint color. Vertex reads MVP, fragment reads color.
+    .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
     .offset = 0,
-    .size = @sizeOf(math.Mat4),
+    .size = @sizeOf(math.Mat4) + @sizeOf(math.Vec4),
 }};
 const mesh_config: pipeline_mod.Config = .{
     .bindings = &mesh_bindings,
@@ -61,6 +62,14 @@ const mesh_config: pipeline_mod.Config = .{
 pub const MeshHandle = u32;
 pub const ShaderHandle = u32;
 pub const TextureHandle = @import("sprite.zig").TextureHandle;
+
+// Data-oriented model: mesh + tint bundled once, drawn by value. Textures join
+// here (UV pipeline + material.texture) when a textured glTF arrives;
+// skeletal/keyframe runtime arrives with an animated glTF. Neither exists yet —
+// physics + procedural motion cover all current movement.
+pub const Model = struct { mesh: MeshHandle, color: math.Vec4 };
+
+const LitPush = struct { mvp: math.Mat4, color: math.Vec4 };
 
 const MeshEntry = struct {
     vertex_buffer: Buffer,
@@ -478,6 +487,26 @@ pub const Renderer = struct {
         self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});
         self.ctx.device.cmdBindIndexBuffer(cmd, entry.index_buffer.handle, 0, .uint32);
         self.ctx.device.cmdDrawIndexed(cmd, entry.index_count, 1, 0, 0, 0);
+    }
+
+    // Lit + tinted via shader 0. drawMesh above stays for unlit/custom
+    // pipelines (e.g. flat ground).
+    pub fn drawMeshTinted(self: *Renderer, handle: MeshHandle, color: math.Vec4, transform: math.Mat4) void {
+        const cmd = self.command_buffers[self.current_frame];
+        const entry = self.meshes[handle];
+        const pipeline = self.shaders[0].pipeline;
+
+        self.ctx.device.cmdBindPipeline(cmd, .graphics, pipeline.handle);
+
+        const push = LitPush{ .mvp = self.viewProj().mul(transform), .color = color };
+        self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(LitPush), &push);
+        self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});
+        self.ctx.device.cmdBindIndexBuffer(cmd, entry.index_buffer.handle, 0, .uint32);
+        self.ctx.device.cmdDrawIndexed(cmd, entry.index_count, 1, 0, 0, 0);
+    }
+
+    pub fn drawModel(self: *Renderer, model: Model, transform: math.Mat4) void {
+        self.drawMeshTinted(model.mesh, model.color, transform);
     }
 
     // Fire-and-forget debug lines in world space, flushed automatically at

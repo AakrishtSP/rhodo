@@ -3,6 +3,7 @@ pub const Renderer = @import("renderer/main.zig").Renderer;
 pub const MeshHandle = @import("renderer/main.zig").MeshHandle;
 pub const ShaderHandle = @import("renderer/main.zig").ShaderHandle;
 pub const TextureHandle = @import("renderer/main.zig").TextureHandle;
+pub const Model = @import("renderer/main.zig").Model;
 pub const KeyCode = @import("input.zig").KeyCode;
 pub const Event = @import("input.zig").Event;
 pub const Input = @import("input.zig").Input;
