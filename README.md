@@ -53,4 +53,6 @@ exe.root_module.addImport("rhodo", rhodo.module("rhodo"));
 ## Notes
 
 - Validation layers are enabled automatically in debug builds
-- Jolt Physics, Dear ImGui, stb_image, and cgltf are vendored under `vendor/`
+- Jolt Physics, Dear ImGui, and SDL headers come from versioned `zig fetch`
+  dependencies (see `build.zig.zon`); only single-header libs (cgltf,
+  stb_image) plus our C shims live in `vendor/`.

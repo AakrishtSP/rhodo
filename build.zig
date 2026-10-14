@@ -24,39 +24,45 @@ pub fn build(b: *std.Build) void {
         .flags = &.{},
     });
 
-    // Dear ImGui 1.92 (vendor/imgui): core + SDL3/Vulkan backends + C shim.
-    // The Vulkan backend uses NO_PROTOTYPES + our loader (we don't link
-    // libvulkan); SDL headers are vendored to match our SDL exactly.
+    // Dear ImGui 1.92: core + SDL3/Vulkan backends from the imgui dep, C shim
+    // from vendor/imgui. The Vulkan backend uses NO_PROTOTYPES + our loader
+    // (we don't link libvulkan); SDL headers come from the sdl dep (3.4.x ABI
+    // matches our 3.4.0 lib).
     // ponytail: no demo/widgets beyond the shim. Extend the shim per widget.
+    const imgui_dep = b.dependency("imgui", .{});
+    const sdl_dep = b.dependency("sdl", .{});
+    lib_mod.addIncludePath(imgui_dep.path("."));
     lib_mod.addIncludePath(b.path("vendor/imgui"));
-    lib_mod.addIncludePath(b.path("vendor/sdl-headers/include"));
+    lib_mod.addIncludePath(sdl_dep.path("include"));
     lib_mod.addIncludePath(b.dependency("vulkan_headers", .{}).path("include"));
     {
         const imgui_flags = &.{ "-std=c++17", "-DIMGUI_IMPL_VULKAN_NO_PROTOTYPES" };
         for ([_][]const u8{
-            "vendor/imgui/imgui.cpp",
-            "vendor/imgui/imgui_draw.cpp",
-            "vendor/imgui/imgui_tables.cpp",
-            "vendor/imgui/imgui_widgets.cpp",
-            "vendor/imgui/backends/imgui_impl_sdl3.cpp",
-            "vendor/imgui/backends/imgui_impl_vulkan.cpp",
-            "vendor/imgui/imgui_shim.cpp",
+            "imgui.cpp",
+            "imgui_draw.cpp",
+            "imgui_tables.cpp",
+            "imgui_widgets.cpp",
+            "backends/imgui_impl_sdl3.cpp",
+            "backends/imgui_impl_vulkan.cpp",
         }) |f| {
-            lib_mod.addCSourceFile(.{ .file = b.path(f), .flags = imgui_flags });
+            lib_mod.addCSourceFile(.{ .file = imgui_dep.path(f), .flags = imgui_flags });
         }
+        lib_mod.addCSourceFile(.{ .file = b.path("vendor/imgui/imgui_shim.cpp"), .flags = imgui_flags });
     }
 
-    // Jolt Physics (vendor/jolt/Jolt, file list in vendor/jolt/sources.zig).
+    // Jolt Physics (jolt dep, file list in vendor/jolt/sources.zig).
     // Excludes Jolt/Renderer/ (its debug renderer; hitboxes go through debug
     // geometry instead). ponytail: ~150 files is a one-time compile, cached
     // after. C++17, no exceptions/RTTI (Jolt uses neither).
+    const jolt_dep = b.dependency("jolt", .{});
+    lib_mod.addIncludePath(jolt_dep.path("."));
     lib_mod.addIncludePath(b.path("vendor/jolt"));
     {
         const jolt_sources = @import("vendor/jolt/sources.zig").files;
         const jolt_flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti" };
         for (jolt_sources) |f| {
             lib_mod.addCSourceFile(.{
-                .file = b.path(b.pathJoin(&.{ "vendor/jolt", f })),
+                .file = jolt_dep.path(f),
                 .flags = jolt_flags,
             });
         }

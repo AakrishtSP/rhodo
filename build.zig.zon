@@ -17,6 +17,21 @@
             .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#8864cdc896bbc2a9b6eb36b3218fc9ef57908d77",
             .hash = "N-V-__8AAPnEbQK6L3hGtJefy0xZjeg7KOxIEj8_obZC2_lF",
         },
+        // Third-party sources (no build.zig; used via dep.path(), not modules).
+        // Replaces ~12MB of vendor/ blobs. cgltf/stb stay vendored (single
+        // headers, work offline, negligible size).
+        .jolt = .{
+            .url = "https://github.com/jrouwe/JoltPhysics/archive/refs/tags/v5.6.0.tar.gz",
+            .hash = "N-V-__8AAFcdJwIbbDnlYvqauoynAkXD36B8fLtw1-yybF9B",
+        },
+        .imgui = .{
+            .url = "https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9b.tar.gz",
+            .hash = "N-V-__8AAPoXegDDrlBN-ExdeEp0KuI2CudplLDeaVyigil4",
+        },
+        .sdl = .{
+            .url = "https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.2.tar.gz",
+            .hash = "N-V-__8AAGdF8wKsT6nK_zxmg0nzMsNPfarxHfO_bLRsmyJ3",
+        },
     },
     .paths = .{
         "build.zig",
