@@ -14,12 +14,10 @@ defer rhodo.Physics.deinit();
 
 while (running) {
     input.beginFrame();
-    while (renderer.pollEvent()) |event| {
-        input.feed(event);
+    while (input.poll()) |event| {
         switch (event) {
             .quit => running = false,
             .resized => renderer.notifyResized(),
-            else => {},
         }
     }
     renderer.pollShaderChanges();          // hot-reload, no-op when clean
@@ -93,20 +91,26 @@ World space. No-op when empty.
   the −1..1 cube mesh matches). No removal, no velocity/rotation setters, no
   contacts, no other shapes.
 
-## Input
+## Input (`src/input.zig`)
 
-Engine (`Renderer.Event`, no SDL in game code): `quit`, `resized`,
-`key_down`/`key_up: KeyCode`, `axis_motion{axis, value}` (sticks −1..1),
-`mouse_motion{dx, dy}` (relative pixels). `KeyCode` covers bound keyboard
-scancodes (`w a s d f g space left_shift escape`), gamepad buttons
-(`pad_south/east/west/north`, dpad, `l1 r1 start`), stick axes. One gamepad
-slot (first connected wins, hot-plug).
-- `setMouseCapture(bool)` — relative mode for mouse-look; `Esc` toggles.
+Engine-owned polled state. Game code owns an instance (`var input: rhodo.Input`)
+and drains with `poll()` — the single SDL queue drain (feeds ImGui first,
+manages the gamepad slot). Requires SDL initialized (`Renderer.init`).
 
-Sandbox mapper (`sandbox/input.zig`, game-owned): `Action` enum bound to
-`[]const KeyCode`; `Input{beginFrame, feed, isPressed, isJustPressed,
-isJustReleased, axisValue, mouse_dx/dy}`. Per-device routing convention:
-mouse + keys drive only when captured, sticks always drive.
+- `beginFrame()` — clears edge flags + mouse delta. `poll() ?Event` — returns
+  `quit`/`resized` only; keys/buttons/axes fold into state (not returned).
+- Queries: `isDown`, `isJustPressed`, `isJustReleased` (per-frame edges),
+  `axisValue` (sticks −1..1), `mouse_dx/dy` (relative pixels). `deinit`
+  closes the gamepad.
+- `KeyCode` — bound keyboard scancodes, gamepad buttons (positional
+  `pad_south`…), stick axes. One gamepad slot (first wins, hot-plug).
+- `Renderer.setMouseCapture(bool)` — relative mode for mouse-look (window
+  property, stays on renderer).
+
+Sandbox convention (`sandbox/input.zig`, game-owned): `Action` enum mapped to
+`[]const KeyCode` with thin `isPressed/isJustPressed` queries over engine
+state. Per-device routing: mouse + keys drive only when captured, sticks
+always drive (gamepad is never a UI pointer).
 
 ## UI (`rhodo.imgui`, Dear ImGui 1.92 via `vendor/imgui/imgui_shim.h`)
 

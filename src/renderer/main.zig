@@ -11,12 +11,7 @@ const math = @import("../math.zig");
 const Camera = @import("../camera.zig").Camera;
 const DebugDraw = @import("debug.zig").DebugDraw;
 const texture_mod = @import("texture.zig");
-
-// Dear ImGui via vendor/imgui/imgui_shim.h (pure C). Re-exported as
-// rhodo.imgui so the sandbox calls it directly with no engine wrapper.
-pub const imgui = @cImport({
-    @cInclude("imgui_shim.h");
-});
+const imgui = @import("../imgui.zig").imgui;
 
 // Vulkan loader for ImGui's NO_PROTOTYPES backend. Resolves through our
 // instance proc addr (which also returns device functions).
@@ -151,12 +146,6 @@ pub const Renderer = struct {
     current_image_index: u32,
     framebuffer_resized: bool,
 
-    // Single gamepad slot (SDL's gamepad_added for a pre-connected pad arrives
-    // during init, so a DualShock is picked up automatically).
-    // ponytail: one pad only; multi-controller when a game needs player 2.
-    gamepad: ?sdl.gamepad.Gamepad = null,
-    gamepad_id: ?sdl.joystick.Id = null,
-
     // Bound once per frame via setCamera; folded into each draw's MVP.
     camera: Camera = .{},
 
@@ -200,8 +189,6 @@ pub const Renderer = struct {
         self.framebuffer_resized = false;
         self.camera = .{};
         self.watched_count = 0;
-        self.gamepad = null;
-        self.gamepad_id = null;
         self.shader_count = 0;
         self.mesh_count = 0;
 
@@ -286,7 +273,6 @@ pub const Renderer = struct {
     pub fn deinit(self: *Renderer) void {
         self.ctx.device.deviceWaitIdle() catch {};
         self.shutdownUi();
-        if (self.gamepad) |g| g.deinit();
 
         for (self.image_available) |s| self.ctx.device.destroySemaphore(s, null);
         self.allocator.free(self.image_available);
@@ -425,145 +411,6 @@ pub const Renderer = struct {
     fn recreateSwapchain(self: *Renderer) !void {
         try self.swapchain.recreate(&self.ctx, self.window, self.shaders[0].pipeline.render_pass);
         imgui.Imgui_SetMinImageCount(@intCast(self.swapchain.images.len));
-    }
-
-    // Input codes the engine emits. Kept small on purpose: one variant per key
-    // or button games bind today. ponytail: add a variant here + a case in the
-    // matching keyCode()/padButtonCode()/axisCode() per new binding; mirror
-    // SDL's full scancode/button sets only if you need free rebinding.
-    pub const KeyCode = enum {
-        // keyboard scancodes
-        w, a, s, d, f, g, space, left_shift, escape,
-        // gamepad buttons (SDL positional; PS4 = south:cross, east:circle, west:square, north:triangle)
-        pad_south, pad_east, pad_west, pad_north,
-        pad_dpad_up, pad_dpad_down, pad_dpad_left, pad_dpad_right,
-        pad_l1, pad_r1, pad_start,
-        // gamepad axes
-        axis_left_x, axis_left_y, axis_right_x, axis_right_y,
-    };
-
-    // Minimal event surface so sandbox/main.zig can drive its own loop without
-    // importing sdl3 — same reason vk.* types don't cross this file's public
-    // API. Add variants here as the engine needs them; this is deliberately not
-    // a 1:1 mirror of sdl.events.Event.
-    pub const Event = union(enum) {
-        quit,
-        resized,
-        key_down: KeyCode,
-        key_up: KeyCode,
-        // Analog axis: sticks in [-1, 1], triggers in [0, 1].
-        axis_motion: struct { axis: KeyCode, value: f32 },
-        // Relative mouse delta in pixels. Only meaningful with capture on.
-        mouse_motion: struct { dx: f32, dy: f32 },
-    };
-
-    // Translate SDL events into the engine's own input vocabulary so game code
-    // never imports sdl3. Escape-to-quit is no longer policy here — the sandbox
-    // decides what keys do. Every raw event goes to ImGui first (it needs the
-    // untranslated SDL_Event for text/mouse/gamepad UI input).
-    pub fn pollEvent(self: *Renderer) ?Event {
-        var raw: sdl.c.SDL_Event = undefined;
-        while (sdl.c.SDL_PollEvent(&raw)) {
-            _ = imgui.Imgui_ProcessEvent(@ptrCast(&raw));
-            switch (sdl.events.Event.fromSdl(raw)) {
-                .quit, .terminating => return .quit,
-                .window_resized => return .resized,
-                .key_down => |k| {
-                    if (keyCode(k.scancode)) |code| return .{ .key_down = code };
-                },
-                .key_up => |k| {
-                    if (keyCode(k.scancode)) |code| return .{ .key_up = code };
-                },
-                .mouse_motion => |m| return .{ .mouse_motion = .{ .dx = m.x_rel, .dy = m.y_rel } },
-                .gamepad_added => |dev| self.openGamepad(dev.id),
-                .gamepad_removed => |dev| self.closeGamepad(dev.id),
-                .gamepad_axis_motion => |a| {
-                    if (!self.isActivePad(a.id)) continue;
-                    if (axisCode(a.axis)) |axis| return .{ .axis_motion = .{
-                        .axis = axis,
-                        .value = @as(f32, @floatFromInt(a.value)) / 32767.0,
-                    } };
-                },
-                .gamepad_button_down => |b| {
-                    if (!self.isActivePad(b.id)) continue;
-                    if (padButtonCode(b.button)) |code| return .{ .key_down = code };
-                },
-                .gamepad_button_up => |b| {
-                    if (!self.isActivePad(b.id)) continue;
-                    if (padButtonCode(b.button)) |code| return .{ .key_up = code };
-                },
-                else => continue,
-            }
-        }
-        return null;
-    }
-
-    // The slot holds one pad; events from any other connected pad are dropped
-    // so a second controller can't drive the same game.
-    fn isActivePad(self: *Renderer, id: sdl.joystick.Id) bool {
-        const open = self.gamepad_id orelse return false;
-        return open.value == id.value;
-    }
-
-    fn openGamepad(self: *Renderer, id: sdl.joystick.Id) void {
-        if (self.gamepad != null) return;
-        self.gamepad = sdl.gamepad.Gamepad.init(id) catch |err| {
-            std.debug.print("Gamepad open failed: {}\n", .{err});
-            return;
-        };
-        self.gamepad_id = id;
-        if (self.gamepad.?.getName()) |name| {
-            std.debug.print("Gamepad connected: {s}\n", .{name});
-        } else |_| {}
-    }
-
-    fn closeGamepad(self: *Renderer, id: sdl.joystick.Id) void {
-        if (!self.isActivePad(id)) return;
-        self.gamepad.?.deinit();
-        self.gamepad = null;
-        self.gamepad_id = null;
-    }
-
-    fn keyCode(scancode: ?sdl.Scancode) ?KeyCode {
-        return switch (scancode orelse return null) {
-            .w => .w,
-            .a => .a,
-            .s => .s,
-            .d => .d,
-            .f => .f,
-            .g => .g,
-            .space => .space,
-            .left_shift => .left_shift,
-            .escape => .escape,
-            else => null,
-        };
-    }
-
-    fn axisCode(axis: sdl.gamepad.Axis) ?KeyCode {
-        return switch (axis) {
-            .left_x => .axis_left_x,
-            .left_y => .axis_left_y,
-            .right_x => .axis_right_x,
-            .right_y => .axis_right_y,
-            else => null,
-        };
-    }
-
-    fn padButtonCode(button: sdl.gamepad.Button) ?KeyCode {
-        return switch (button) {
-            .south => .pad_south,
-            .east => .pad_east,
-            .west => .pad_west,
-            .north => .pad_north,
-            .dpad_up => .pad_dpad_up,
-            .dpad_down => .pad_dpad_down,
-            .dpad_left => .pad_dpad_left,
-            .dpad_right => .pad_dpad_right,
-            .left_shoulder => .pad_l1,
-            .right_shoulder => .pad_r1,
-            .start => .pad_start,
-            else => null,
-        };
     }
 
     // Bind the camera for this frame's draws. The renderer folds its view/proj
