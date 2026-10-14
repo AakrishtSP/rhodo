@@ -8,6 +8,7 @@ const Pipeline = pipeline_mod.Pipeline;
 const Buffer = @import("vk/buffer.zig").Buffer;
 const mesh = @import("mesh.zig");
 const math = @import("../math.zig");
+const Camera = @import("../camera.zig").Camera;
 
 const max_frames_in_flight: u32 = 2;
 
@@ -92,16 +93,28 @@ pub const Renderer = struct {
     current_image_index: u32,
     framebuffer_resized: bool,
 
+    // Single gamepad slot (SDL's gamepad_added for a pre-connected pad arrives
+    // during init, so a DualShock is picked up automatically).
+    // ponytail: one pad only; multi-controller when a game needs player 2.
+    gamepad: ?sdl.gamepad.Gamepad = null,
+    gamepad_id: ?sdl.joystick.Id = null,
+
+    // Bound once per frame via setCamera; folded into each draw's MVP.
+    camera: Camera = .{},
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
         self.io = io;
         self.current_frame = 0;
         self.framebuffer_resized = false;
+        self.camera = .{};
+        self.gamepad = null;
+        self.gamepad_id = null;
         self.shader_count = 0;
         self.mesh_count = 0;
 
-        try sdl.init(.{ .video = true });
+        try sdl.init(.{ .video = true, .gamepad = true });
         errdefer sdl.shutdown();
 
         self.window = sdl.video.Window.init("Rhodo", 800, 600, .{ .vulkan = true, .resizable = true }) catch |err| {
@@ -133,6 +146,7 @@ pub const Renderer = struct {
 
     pub fn deinit(self: *Renderer) void {
         self.ctx.device.deviceWaitIdle() catch {};
+        if (self.gamepad) |g| g.deinit();
 
         for (self.image_available) |s| self.ctx.device.destroySemaphore(s, null);
         self.allocator.free(self.image_available);
@@ -152,7 +166,7 @@ pub const Renderer = struct {
         self.ctx.deinit();
 
         self.window.deinit();
-        sdl.quit(.{ .video = true });
+        sdl.quit(.{ .video = true, .gamepad = true });
         sdl.shutdown();
     }
 
@@ -259,30 +273,146 @@ pub const Renderer = struct {
         self.framebuffer_resized = true;
     }
 
+    // Input codes the engine emits. Kept small on purpose: one variant per key
+    // or button games bind today. ponytail: add a variant here + a case in the
+    // matching keyCode()/padButtonCode()/axisCode() per new binding; mirror
+    // SDL's full scancode/button sets only if you need free rebinding.
+    pub const KeyCode = enum {
+        // keyboard scancodes
+        w, a, s, d, space, left_shift, escape,
+        // gamepad buttons (SDL positional; PS4 = south:cross, east:circle, west:square, north:triangle)
+        pad_south, pad_east, pad_west, pad_north,
+        pad_dpad_up, pad_dpad_down, pad_dpad_left, pad_dpad_right,
+        pad_l1, pad_r1,
+        // gamepad axes
+        axis_left_x, axis_left_y, axis_right_x, axis_right_y,
+    };
+
     // Minimal event surface so sandbox/main.zig can drive its own loop without
     // importing sdl3 — same reason vk.* types don't cross this file's public
-    // API. Add variants here as the engine needs them (key press, mouse, etc);
-    // this is deliberately not a 1:1 mirror of sdl.events.Event.
+    // API. Add variants here as the engine needs them; this is deliberately not
+    // a 1:1 mirror of sdl.events.Event.
     pub const Event = union(enum) {
         quit,
         resized,
+        key_down: KeyCode,
+        key_up: KeyCode,
+        // Analog axis: sticks in [-1, 1], triggers in [0, 1].
+        axis_motion: struct { axis: KeyCode, value: f32 },
+        // Relative mouse delta in pixels. Only meaningful with capture on.
+        mouse_motion: struct { dx: f32, dy: f32 },
     };
 
-    // ponytail: Escape-quits-the-app is baked in here as a placeholder. That's
-    // input policy, which belongs in game code, not the render/window layer —
-    // upgrade path is dropping the key_down case here and adding a real input
-    // event (e.g. .key_down: KeyCode) once you have an input system to hand it to.
+    // Translate SDL events into the engine's own input vocabulary so game code
+    // never imports sdl3. Escape-to-quit is no longer policy here — the sandbox
+    // decides what keys do.
     pub fn pollEvent(self: *Renderer) ?Event {
-        _ = self;
         while (sdl.events.poll()) |event| {
             switch (event) {
                 .quit, .terminating => return .quit,
                 .window_resized => return .resized,
-                .key_down => |k| if (k.key == .escape) return .quit,
+                .key_down => |k| {
+                    if (keyCode(k.scancode)) |code| return .{ .key_down = code };
+                },
+                .key_up => |k| {
+                    if (keyCode(k.scancode)) |code| return .{ .key_up = code };
+                },
+                .mouse_motion => |m| return .{ .mouse_motion = .{ .dx = m.x_rel, .dy = m.y_rel } },
+                .gamepad_added => |dev| self.openGamepad(dev.id),
+                .gamepad_removed => |dev| self.closeGamepad(dev.id),
+                .gamepad_axis_motion => |a| {
+                    if (!self.isActivePad(a.id)) continue;
+                    if (axisCode(a.axis)) |axis| return .{ .axis_motion = .{
+                        .axis = axis,
+                        .value = @as(f32, @floatFromInt(a.value)) / 32767.0,
+                    } };
+                },
+                .gamepad_button_down => |b| {
+                    if (!self.isActivePad(b.id)) continue;
+                    if (padButtonCode(b.button)) |code| return .{ .key_down = code };
+                },
+                .gamepad_button_up => |b| {
+                    if (!self.isActivePad(b.id)) continue;
+                    if (padButtonCode(b.button)) |code| return .{ .key_up = code };
+                },
                 else => continue,
             }
         }
         return null;
+    }
+
+    // The slot holds one pad; events from any other connected pad are dropped
+    // so a second controller can't drive the same game.
+    fn isActivePad(self: *Renderer, id: sdl.joystick.Id) bool {
+        const open = self.gamepad_id orelse return false;
+        return open.value == id.value;
+    }
+
+    fn openGamepad(self: *Renderer, id: sdl.joystick.Id) void {
+        if (self.gamepad != null) return;
+        self.gamepad = sdl.gamepad.Gamepad.init(id) catch |err| {
+            std.debug.print("Gamepad open failed: {}\n", .{err});
+            return;
+        };
+        self.gamepad_id = id;
+    }
+
+    fn closeGamepad(self: *Renderer, id: sdl.joystick.Id) void {
+        if (!self.isActivePad(id)) return;
+        self.gamepad.?.deinit();
+        self.gamepad = null;
+        self.gamepad_id = null;
+    }
+
+    fn keyCode(scancode: ?sdl.Scancode) ?KeyCode {
+        return switch (scancode orelse return null) {
+            .w => .w,
+            .a => .a,
+            .s => .s,
+            .d => .d,
+            .space => .space,
+            .left_shift => .left_shift,
+            .escape => .escape,
+            else => null,
+        };
+    }
+
+    fn axisCode(axis: sdl.gamepad.Axis) ?KeyCode {
+        return switch (axis) {
+            .left_x => .axis_left_x,
+            .left_y => .axis_left_y,
+            .right_x => .axis_right_x,
+            .right_y => .axis_right_y,
+            else => null,
+        };
+    }
+
+    fn padButtonCode(button: sdl.gamepad.Button) ?KeyCode {
+        return switch (button) {
+            .south => .pad_south,
+            .east => .pad_east,
+            .west => .pad_west,
+            .north => .pad_north,
+            .dpad_up => .pad_dpad_up,
+            .dpad_down => .pad_dpad_down,
+            .dpad_left => .pad_dpad_left,
+            .dpad_right => .pad_dpad_right,
+            .left_shoulder => .pad_l1,
+            .right_shoulder => .pad_r1,
+            else => null,
+        };
+    }
+
+    // Bind the camera for this frame's draws. The renderer folds its view/proj
+    // into each MVP; game code never multiplies them itself.
+    pub fn setCamera(self: *Renderer, cam: Camera) void {
+        self.camera = cam;
+    }
+
+    // Toggle OS mouse capture: cursor hidden, relative motion only. Needed to
+    // steer a mouse-look camera, and the escape hatch back to a normal cursor.
+    pub fn setMouseCapture(self: *Renderer, enabled: bool) !void {
+        return sdl.mouse.setWindowRelativeMode(self.window, enabled);
     }
 
     // Shader playground hot-reload entry point. Rebuilds just the pipeline from
@@ -330,13 +460,7 @@ pub const Renderer = struct {
 
         const aspect = @as(f32, @floatFromInt(self.swapchain.extent.width)) /
             @as(f32, @floatFromInt(self.swapchain.extent.height));
-        const view = math.Mat4.lookAt(
-            .{ .x = 0, .y = 0, .z = 4 },
-            .{ .x = 0, .y = 0, .z = 0 },
-            .{ .x = 0, .y = 1, .z = 0 },
-        );
-        const proj = math.Mat4.perspective(std.math.pi / 4.0, aspect, 0.1, 100.0);
-        const mvp = proj.mul(view).mul(transform);
+        const mvp = self.camera.projection(aspect).mul(self.camera.view()).mul(transform);
 
         self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &mvp);
         self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});

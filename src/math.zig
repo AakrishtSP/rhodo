@@ -7,8 +7,14 @@ pub const Vec3 = struct {
     y: f32,
     z: f32,
 
+    pub fn add(a: Vec3, b: Vec3) Vec3 {
+        return .{ .x = a.x + b.x, .y = a.y + b.y, .z = a.z + b.z };
+    }
     pub fn sub(a: Vec3, b: Vec3) Vec3 {
         return .{ .x = a.x - b.x, .y = a.y - b.y, .z = a.z - b.z };
+    }
+    pub fn scale(a: Vec3, s: f32) Vec3 {
+        return .{ .x = a.x * s, .y = a.y * s, .z = a.z * s };
     }
     pub fn cross(a: Vec3, b: Vec3) Vec3 {
         return .{
