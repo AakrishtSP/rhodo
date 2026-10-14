@@ -22,6 +22,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
+        "shaders",
         // For example...
         //"LICENSE",
         //"README.md",
