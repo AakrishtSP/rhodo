@@ -41,7 +41,7 @@ const mesh_config: pipeline_mod.Config = .{
 };
 
 // Public surface for the rest of the engine: init/deinit, beginFrame/endFrame
-// bracket a frame, reloadShaders is the shader-playground hot-reload hook.
+// bracket a frame, pollShaderChanges is the shader-playground hot-reload hook.
 // No vk.* type appears in any of these five signatures on purpose — that's
 // what keeps the engine loop free of Vulkan, and is the seam a future backend
 // swap would replace, if one is ever needed.
@@ -97,6 +97,8 @@ pub const shader = struct {
     pub const mesh_vert = "shaders/mesh.vert.spv";
     pub const lit_frag = "shaders/mesh.frag.spv";
     pub const flat_frag = "shaders/flat.frag.spv";
+    pub const sprite_vert = "shaders/sprite.vert.spv";
+    pub const sprite_frag = "shaders/sprite.frag.spv";
 };
 
 pub const Renderer = struct {
@@ -141,6 +143,9 @@ pub const Renderer = struct {
     // CPU line list, flushed automatically at endFrame (depth off, drawn last).
     debug: DebugDraw,
 
+    watched: [8]WatchEntry = undefined,
+    watched_count: u32 = 0,
+
     // Sprites: one combined-image-sampler descriptor per texture, one shared
     // unit quad + pipeline (blend on, depth off). One draw call per sprite.
     tex_layout: vk.DescriptorSetLayout,
@@ -152,6 +157,21 @@ pub const Renderer = struct {
     quad_vb: Buffer,
     quad_ib: Buffer,
 
+    // Shader hot-reload watch list. Every pipeline (loadShader, debug lines,
+    // sprites) registers its .spv sources; pollShaderChanges() stats them once
+    // per frame and rebuilds dirty pipelines in place. Targets are tags, not
+    // pointers — Renderer is returned by value from init, so stored pointers
+    // would dangle; these resolve against the live self.
+    // ponytail: fixed 8 slots. Grow when you load more shaders.
+    const WatchTarget = union(enum) { shader: ShaderHandle, debug, sprite };
+    const WatchEntry = struct {
+        target: WatchTarget,
+        vert_path: []const u8,
+        frag_path: []const u8,
+        vert_mtime: std.Io.Timestamp,
+        frag_mtime: std.Io.Timestamp,
+    };
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
@@ -159,6 +179,7 @@ pub const Renderer = struct {
         self.current_frame = 0;
         self.framebuffer_resized = false;
         self.camera = .{};
+        self.watched_count = 0;
         self.gamepad = null;
         self.gamepad_id = null;
         self.shader_count = 0;
@@ -190,6 +211,7 @@ pub const Renderer = struct {
 
         self.debug = try DebugDraw.init(&self.ctx, self.io, self.swapchain.format);
         errdefer self.debug.deinit(&self.ctx);
+        self.watch(.debug, DebugDraw.vert_path, DebugDraw.frag_path);
 
         self.tex_layout = try self.ctx.device.createDescriptorSetLayout(&.{
             .binding_count = 1,
@@ -213,7 +235,7 @@ pub const Renderer = struct {
         }, null);
         errdefer self.ctx.device.destroyDescriptorPool(self.tex_pool, null);
         self.texture_count = 0;
-        self.sprite_pipeline = try Pipeline.init(&self.ctx, self.io, self.swapchain.format, "shaders/sprite.vert.spv", "shaders/sprite.frag.spv", .{
+        self.sprite_pipeline = try Pipeline.init(&self.ctx, self.io, self.swapchain.format, shader.sprite_vert, shader.sprite_frag, .{
             .bindings = &sprite_bindings,
             .attributes = &sprite_attributes,
             .set_layouts = &self.tex_layouts,
@@ -221,6 +243,7 @@ pub const Renderer = struct {
             .blend = true,
         });
         errdefer self.sprite_pipeline.deinit(&self.ctx);
+        self.watch(.sprite, shader.sprite_vert, shader.sprite_frag);
         self.quad_vb = try Buffer.hostVisibleWith(&self.ctx, .{ .vertex_buffer_bit = true }, SpriteVertex, &quad_verts);
         errdefer self.quad_vb.deinit(&self.ctx);
         self.quad_ib = try Buffer.hostVisibleWith(&self.ctx, .{ .index_buffer_bit = true }, u32, &quad_indices);
@@ -522,14 +545,57 @@ pub const Renderer = struct {
         return sdl.mouse.setWindowRelativeMode(self.window, enabled);
     }
 
-    // Shader playground hot-reload entry point. Rebuilds just the pipeline from
-    // new shader source; if the new shaders fail to compile, the old pipeline
-    // keeps running and the error is returned to the caller to report.
-    pub fn reloadShaders(self: *Renderer, vert_path: []const u8, frag_path: []const u8) !void {
-        // ponytail: reload shader 0 only. Per-handle reload when shader playground needs it.
-        try self.shaders[0].pipeline.reload(&self.ctx, self.io, vert_path, frag_path);
-        self.shaders[0].vert_path = vert_path;
-        self.shaders[0].frag_path = frag_path;
+    // Stat every watched shader file; rebuild pipelines whose sources changed.
+    // deviceWaitIdle runs first (only on change frames) so a pipeline in use
+    // by an in-flight frame isn't destroyed. Failures print once and keep the
+    // old pipeline; the mtime still advances so it retries on the next save.
+    pub fn pollShaderChanges(self: *Renderer) void {
+        var any = false;
+        for (self.watched[0..self.watched_count]) |*w| {
+            if (mtimeOf(self.io, w.vert_path).nanoseconds != w.vert_mtime.nanoseconds or
+                mtimeOf(self.io, w.frag_path).nanoseconds != w.frag_mtime.nanoseconds)
+            {
+                any = true;
+                break;
+            }
+        }
+        if (!any) return;
+        self.ctx.device.deviceWaitIdle() catch {};
+        for (self.watched[0..self.watched_count]) |*w| {
+            const vm = mtimeOf(self.io, w.vert_path);
+            const fm = mtimeOf(self.io, w.frag_path);
+            if (vm.nanoseconds == w.vert_mtime.nanoseconds and fm.nanoseconds == w.frag_mtime.nanoseconds) continue;
+            w.vert_mtime = vm;
+            w.frag_mtime = fm;
+            self.pipelineOf(w.target).reload(&self.ctx, self.io, w.vert_path, w.frag_path) catch |err| {
+                std.debug.print("Shader reload failed for {s} / {s}: {}, keeping previous pipeline\n", .{ w.vert_path, w.frag_path, err });
+            };
+        }
+    }
+
+    fn pipelineOf(self: *Renderer, target: WatchTarget) *Pipeline {
+        return switch (target) {
+            .shader => |h| &self.shaders[h].pipeline,
+            .debug => &self.debug.pipeline,
+            .sprite => &self.sprite_pipeline,
+        };
+    }
+
+    fn watch(self: *Renderer, target: WatchTarget, vert_path: []const u8, frag_path: []const u8) void {
+        if (self.watched_count >= self.watched.len) return;
+        self.watched[self.watched_count] = .{
+            .target = target,
+            .vert_path = vert_path,
+            .frag_path = frag_path,
+            .vert_mtime = mtimeOf(self.io, vert_path),
+            .frag_mtime = mtimeOf(self.io, frag_path),
+        };
+        self.watched_count += 1;
+    }
+
+    fn mtimeOf(io: std.Io, path: []const u8) std.Io.Timestamp {
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return .{ .nanoseconds = 0 };
+        return stat.mtime;
     }
 
     pub fn loadShader(self: *Renderer, vert_path: []const u8, frag_path: []const u8) !ShaderHandle {
@@ -540,6 +606,7 @@ pub const Renderer = struct {
             .frag_path = frag_path,
         };
         self.shader_count += 1;
+        self.watch(.{ .shader = handle }, vert_path, frag_path);
         return handle;
     }
 

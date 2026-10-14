@@ -46,9 +46,13 @@ pub const DebugDraw = struct {
     verts: [max_verts]LineVertex = undefined,
     count: u32 = 0,
 
+    // Line shader sources (also registered for hot-reload by the renderer).
+    pub const vert_path = "shaders/line.vert.spv";
+    pub const frag_path = "shaders/line.frag.spv";
+
     pub fn init(ctx: *const Context, io: std.Io, format: vk.Format) !DebugDraw {
         return .{
-            .pipeline = try Pipeline.init(ctx, io, format, "shaders/line.vert.spv", "shaders/line.frag.spv", line_config),
+            .pipeline = try Pipeline.init(ctx, io, format, vert_path, frag_path, line_config),
             .buffer = try Buffer.create(
                 ctx,
                 @sizeOf(LineVertex) * max_verts,

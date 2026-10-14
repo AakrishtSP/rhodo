@@ -124,6 +124,11 @@ pub fn buildPipeline(ctx: *const Context, io: std.Io, layout: vk.PipelineLayout,
     const frag_spv = try std.Io.Dir.cwd().readFileAlloc(io, frag_path, ctx.allocator, .unlimited);
     defer ctx.allocator.free(frag_spv);
 
+    // Reject garbage/truncated SPV before it reaches the driver: invalid
+    // modules can abort inside vkCreateShaderModule instead of returning an
+    // error (e.g. statting a file mid-write while dxc saves it).
+    if (!isSpirv(vert_spv) or !isSpirv(frag_spv)) return error.InvalidSpirv;
+
     const vert = try createShaderModule(ctx, vert_spv);
     defer ctx.device.destroyShaderModule(vert, null);
     const frag = try createShaderModule(ctx, frag_spv);
@@ -224,4 +229,9 @@ fn createShaderModule(ctx: *const Context, code: []const u8) !vk.ShaderModule {
         .code_size = code.len,
         .p_code = @ptrCast(@alignCast(code.ptr)),
     }, null);
+}
+
+fn isSpirv(code: []const u8) bool {
+    if (code.len < 20 or code.len % 4 != 0) return false;
+    return std.mem.readInt(u32, code[0..4], .little) == 0x07230203;
 }
