@@ -165,7 +165,7 @@ pub const Renderer = struct {
         // it; the evdev driver still exposes standard gamepads (sticks/buttons).
         // ponytail: re-enable if you ever need HIDAPI-only features (gyro, lightbar).
         try sdl.hints.set(.joystick_hidapi, "0");
-        try sdl.init(.{ .video = true, .gamepad = true });
+        try sdl.init(.{ .video = true, .gamepad = true, .audio = true });
         errdefer sdl.shutdown();
 
         self.window = sdl.video.Window.init("Rhodo", 800, 600, .{ .vulkan = true, .resizable = true }) catch |err| {
@@ -230,7 +230,7 @@ pub const Renderer = struct {
         self.ctx.deinit();
 
         self.window.deinit();
-        sdl.quit(.{ .video = true, .gamepad = true });
+        sdl.quit(.{ .video = true, .gamepad = true, .audio = true });
         sdl.shutdown();
     }
 
