@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) void {
         .{ "shaders/flat.frag.hlsl", "flat.frag.spv", "ps_6_0" },
         .{ "shaders/line.vert.hlsl", "line.vert.spv", "vs_6_0" },
         .{ "shaders/line.frag.hlsl", "line.frag.spv", "ps_6_0" },
+        .{ "shaders/sprite.vert.hlsl", "sprite.vert.spv", "vs_6_0" },
+        .{ "shaders/sprite.frag.hlsl", "sprite.frag.spv", "ps_6_0" },
     };
     const shader_step = b.step("shaders", "Compile HLSL shaders");
     inline for (shaders) |s| {
@@ -33,6 +35,11 @@ pub fn build(b: *std.Build) void {
     lib_mod.addIncludePath(b.path("vendor/cgltf"));
     lib_mod.addCSourceFile(.{
         .file = b.path("vendor/cgltf/cgltf_impl.c"),
+        .flags = &.{},
+    });
+    lib_mod.addIncludePath(b.path("vendor/stb"));
+    lib_mod.addCSourceFile(.{
+        .file = b.path("vendor/stb/stb_impl.c"),
         .flags = &.{},
     });
 

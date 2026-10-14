@@ -79,5 +79,5 @@ pub fn endSingleTime(ctx: *const Context, pool: vk.CommandPool, cmd: vk.CommandB
         .p_command_buffers = @ptrCast(&cmd),
     }}, .null_handle);
     try ctx.device.queueWaitIdle(ctx.graphics_queue);
-    ctx.device.freeCommandBuffers(pool, 1, @ptrCast(&cmd));
+    ctx.device.freeCommandBuffers(pool, &.{cmd});
 }

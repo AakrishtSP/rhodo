@@ -10,8 +10,11 @@ const mesh = @import("mesh.zig");
 const math = @import("../math.zig");
 const Camera = @import("../camera.zig").Camera;
 const DebugDraw = @import("debug.zig").DebugDraw;
+const texture_mod = @import("texture.zig");
 
 const max_frames_in_flight: u32 = 2;
+// ponytail: ceiling 32 textures, one descriptor set each. Bigger pool when needed.
+const max_textures: u32 = 32;
 
 // Vertex layout + push constant for the mesh pipeline. pos at offset 0, normal
 // after it; one 64-byte vertex-stage push constant for the MVP matrix.
@@ -44,6 +47,38 @@ const mesh_config: pipeline_mod.Config = .{
 // swap would replace, if one is ever needed.
 pub const MeshHandle = u32;
 pub const ShaderHandle = u32;
+pub const TextureHandle = u32;
+
+const TextureEntry = struct {
+    tex: texture_mod.Texture,
+    set: vk.DescriptorSet,
+};
+
+const SpriteVertex = struct { pos: math.Vec3, uv: [2]f32 };
+
+// Unit quad, centered, UV origin top-left to match stb_image row order.
+const quad_verts = [_]SpriteVertex{
+    .{ .pos = .{ .x = -0.5, .y = -0.5, .z = 0 }, .uv = .{ 0, 0 } },
+    .{ .pos = .{ .x = 0.5, .y = -0.5, .z = 0 }, .uv = .{ 1, 0 } },
+    .{ .pos = .{ .x = 0.5, .y = 0.5, .z = 0 }, .uv = .{ 1, 1 } },
+    .{ .pos = .{ .x = -0.5, .y = 0.5, .z = 0 }, .uv = .{ 0, 1 } },
+};
+const quad_indices = [_]u32{ 0, 1, 2, 0, 2, 3 };
+
+const sprite_bindings = [_]vk.VertexInputBindingDescription{.{
+    .binding = 0,
+    .stride = @sizeOf(SpriteVertex),
+    .input_rate = .vertex,
+}};
+const sprite_attributes = [_]vk.VertexInputAttributeDescription{
+    .{ .location = 0, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(SpriteVertex, "pos") },
+    .{ .location = 1, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(SpriteVertex, "uv") },
+};
+const sprite_push = [_]vk.PushConstantRange{.{
+    .stage_flags = .{ .vertex_bit = true },
+    .offset = 0,
+    .size = @sizeOf(math.Mat4),
+}};
 
 const MeshEntry = struct {
     vertex_buffer: Buffer,
@@ -106,6 +141,17 @@ pub const Renderer = struct {
     // CPU line list, flushed automatically at endFrame (depth off, drawn last).
     debug: DebugDraw,
 
+    // Sprites: one combined-image-sampler descriptor per texture, one shared
+    // unit quad + pipeline (blend on, depth off). One draw call per sprite.
+    tex_layout: vk.DescriptorSetLayout,
+    tex_layouts: [1]vk.DescriptorSetLayout = undefined,
+    tex_pool: vk.DescriptorPool,
+    textures: [max_textures]TextureEntry = undefined,
+    texture_count: u32 = 0,
+    sprite_pipeline: Pipeline,
+    quad_vb: Buffer,
+    quad_ib: Buffer,
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
@@ -140,6 +186,41 @@ pub const Renderer = struct {
         self.debug = try DebugDraw.init(&self.ctx, self.io, self.swapchain.format);
         errdefer self.debug.deinit(&self.ctx);
 
+        self.tex_layout = try self.ctx.device.createDescriptorSetLayout(&.{
+            .binding_count = 1,
+            .p_bindings = &.{
+                .{
+                    .binding = 0,
+                    .descriptor_type = .combined_image_sampler,
+                    .descriptor_count = 1,
+                    .stage_flags = .{ .fragment_bit = true },
+                },
+            },
+        }, null);
+        errdefer self.ctx.device.destroyDescriptorSetLayout(self.tex_layout, null);
+        self.tex_layouts = .{self.tex_layout};
+        self.tex_pool = try self.ctx.device.createDescriptorPool(&.{
+            .max_sets = max_textures,
+            .pool_size_count = 1,
+            .p_pool_sizes = &.{
+                .{ .type = .combined_image_sampler, .descriptor_count = max_textures },
+            },
+        }, null);
+        errdefer self.ctx.device.destroyDescriptorPool(self.tex_pool, null);
+        self.texture_count = 0;
+        self.sprite_pipeline = try Pipeline.init(&self.ctx, self.io, self.swapchain.format, "shaders/sprite.vert.spv", "shaders/sprite.frag.spv", .{
+            .bindings = &sprite_bindings,
+            .attributes = &sprite_attributes,
+            .set_layouts = &self.tex_layouts,
+            .push_constant_ranges = &sprite_push,
+            .blend = true,
+        });
+        errdefer self.sprite_pipeline.deinit(&self.ctx);
+        self.quad_vb = try Buffer.hostVisibleWith(&self.ctx, .{ .vertex_buffer_bit = true }, SpriteVertex, &quad_verts);
+        errdefer self.quad_vb.deinit(&self.ctx);
+        self.quad_ib = try Buffer.hostVisibleWith(&self.ctx, .{ .index_buffer_bit = true }, u32, &quad_indices);
+        errdefer self.quad_ib.deinit(&self.ctx);
+
         try self.swapchain.buildFramebuffers(&self.ctx, self.shaders[0].pipeline.render_pass);
 
         try self.createCommandPool();
@@ -170,6 +251,12 @@ pub const Renderer = struct {
         }
         for (self.shaders[0..self.shader_count]) |*s| s.pipeline.deinit(&self.ctx);
         self.debug.deinit(&self.ctx);
+        for (self.textures[0..self.texture_count]) |*e| e.tex.deinit(&self.ctx);
+        self.ctx.device.destroyDescriptorPool(self.tex_pool, null);
+        self.ctx.device.destroyDescriptorSetLayout(self.tex_layout, null);
+        self.sprite_pipeline.deinit(&self.ctx);
+        self.quad_vb.deinit(&self.ctx);
+        self.quad_ib.deinit(&self.ctx);
         self.swapchain.deinit(&self.ctx);
         self.ctx.deinit();
 
@@ -484,6 +571,67 @@ pub const Renderer = struct {
 
     pub fn drawAabb(self: *Renderer, min: math.Vec3, max: math.Vec3, color: math.Vec3) void {
         self.debug.aabb(min, max, color);
+    }
+
+    // Upload an RGBA image as a sampled texture. One descriptor set per
+    // texture, drawn with drawSprite (blend on, depth off, screen space).
+    pub fn loadTexture(self: *Renderer, path: [:0]const u8) !TextureHandle {
+        if (self.texture_count >= max_textures) return error.TooManyTextures;
+        const handle: TextureHandle = self.texture_count;
+
+        const tex = try texture_mod.load(&self.ctx, self.command_pool, path);
+        errdefer tex.deinit(&self.ctx);
+
+        var sets: [1]vk.DescriptorSet = undefined;
+        try self.ctx.device.allocateDescriptorSets(&.{
+            .descriptor_pool = self.tex_pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = &self.tex_layouts,
+        }, &sets);
+
+        const img_info = vk.DescriptorImageInfo{
+            .sampler = tex.sampler,
+            .image_view = tex.view,
+            .image_layout = .shader_read_only_optimal,
+        };
+        // Unused descriptor kinds still need a pointer; never dereferenced for
+        // a combined image sampler write.
+        const dummy_buf = std.mem.zeroes(vk.DescriptorBufferInfo);
+        const dummy_view: vk.BufferView = .null_handle;
+        self.ctx.device.updateDescriptorSets(&.{.{
+            .dst_set = sets[0],
+            .dst_binding = 0,
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .p_image_info = @ptrCast(&img_info),
+            .p_buffer_info = @ptrCast(&dummy_buf),
+            .p_texel_buffer_view = @ptrCast(&dummy_view),
+        }}, null);
+
+        self.textures[handle] = .{ .tex = tex, .set = sets[0] };
+        self.texture_count += 1;
+        return handle;
+    }
+
+    // Screen-space sprite: transform maps the unit quad to pixels (origin
+    // top-left). One draw call per sprite, no batching.
+    // ponytail: no batching until draw calls hurt.
+    pub fn drawSprite(self: *Renderer, tex: TextureHandle, transform: math.Mat4) void {
+        const cmd = self.command_buffers[self.current_frame];
+        const entry = self.textures[tex];
+
+        self.ctx.device.cmdBindPipeline(cmd, .graphics, self.sprite_pipeline.handle);
+        self.ctx.device.cmdBindDescriptorSets(cmd, .graphics, self.sprite_pipeline.layout, 0, &.{entry.set}, null);
+
+        const w: f32 = @floatFromInt(self.swapchain.extent.width);
+        const h: f32 = @floatFromInt(self.swapchain.extent.height);
+        const mvp = math.Mat4.orthographic(0, w, h, 0, -1, 1).mul(transform);
+
+        self.ctx.device.cmdPushConstants(cmd, self.sprite_pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &mvp);
+        self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{self.quad_vb.handle}, &.{0});
+        self.ctx.device.cmdBindIndexBuffer(cmd, self.quad_ib.handle, 0, .uint32);
+        self.ctx.device.cmdDrawIndexed(cmd, quad_indices.len, 1, 0, 0, 0);
     }
 
     fn viewProj(self: *Renderer) math.Mat4 {
