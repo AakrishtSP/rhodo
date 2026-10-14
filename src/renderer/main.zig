@@ -437,7 +437,7 @@ pub const Renderer = struct {
         // gamepad buttons (SDL positional; PS4 = south:cross, east:circle, west:square, north:triangle)
         pad_south, pad_east, pad_west, pad_north,
         pad_dpad_up, pad_dpad_down, pad_dpad_left, pad_dpad_right,
-        pad_l1, pad_r1,
+        pad_l1, pad_r1, pad_start,
         // gamepad axes
         axis_left_x, axis_left_y, axis_right_x, axis_right_y,
     };
@@ -561,6 +561,7 @@ pub const Renderer = struct {
             .dpad_right => .pad_dpad_right,
             .left_shoulder => .pad_l1,
             .right_shoulder => .pad_r1,
+            .start => .pad_start,
             else => null,
         };
     }

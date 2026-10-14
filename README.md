@@ -42,6 +42,9 @@ Keyboard + mouse:
 - `Escape` — release / recapture the mouse cursor
 - Close the window — quit
 
+Mouse is captured for the game by default; release it to click the Debug UI
+(camera and keys freeze while released, gamepad sticks stay live).
+
 Gamepad (first connected pad; hot-plug supported):
 
 - Left stick / D-pad — move
@@ -49,6 +52,7 @@ Gamepad (first connected pad; hot-plug supported):
 - `R1` (RB) / `L1` (LB) — move up / down
 - `X` (cross/south) — drop a box
 - `△` (triangle/north) — cycle hitbox view
+- `Start` — release / recapture the mouse cursor
 
 ## Notes
 
