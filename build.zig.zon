@@ -22,7 +22,6 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "sandbox",
         // For example...
         //"LICENSE",
         //"README.md",

@@ -1,6 +1,10 @@
 # Rhodo Engine
 
-A Vulkan-based game engine written in Zig.
+A Vulkan-based game engine written in Zig. FOSS library — games using it live
+in separate (private) repos and depend on this via the Zig package manager.
+
+Interface docs: `API.md`. Default shaders: `shaders/` (games compile and own
+their copies).
 
 ## Dependencies
 
@@ -13,11 +17,11 @@ sudo pacman -S zig vulkan-devel vulkan-validation-layers directx-shader-compiler
 - **zig** — compiler and build system (0.16.0+)
 - **vulkan-devel** — Vulkan headers and loader
 - **vulkan-validation-layers** — validation layers for debug builds
-- **directx-shader-compiler** — HLSL to SPIR-V shader compilation
+- **directx-shader-compiler** — HLSL to SPIR-V shader compilation (games)
 
 SDL3 and vulkan-zig are fetched automatically by the build system.
 
-## Building and Running
+## Building and Testing
 
 ```bash
 git clone https://github.com/AakrishtSP/rhodo
@@ -25,37 +29,28 @@ git clone https://github.com/AakrishtSP/rhodo
 # git clone git@github.com:AakrishtSP/rhodo.git
 # if using ssh
 cd rhodo
-zig build run # For debug builds
-# or
-zig build run -Doptimize=ReleaseFast # For Release builds
+zig build test
 ```
 
-## Controls
+## Using it in a game
 
-Keyboard + mouse:
+```zig
+// build.zig.zon
+.dependencies = .{
+    .rhodo = .{
+        .url = "git+https://github.com/AakrishtSP/rhodo#<commit>",
+        .hash = "...", // from `zig fetch`
+    },
+},
+```
 
-- `W`/`A`/`S`/`D` — move
-- `Space` / `Shift` — move up / down
-- `F` — drop a box
-- `G` — cycle hitbox view: AABB / OBB gizmo / off
-- Mouse — look (captured while the window has focus)
-- `Escape` — release / recapture the mouse cursor
-- Close the window — quit
-
-Mouse is captured for the game by default; release it to click the Debug UI
-(camera and keys freeze while released, gamepad sticks stay live).
-
-Gamepad (first connected pad; hot-plug supported):
-
-- Left stick / D-pad — move
-- Right stick — look
-- `R1` (RB) / `L1` (LB) — move up / down
-- `X` (cross/south) — drop a box
-- `△` (triangle/north) — cycle hitbox view
-- `Start` — release / recapture the mouse cursor
+```zig
+// build.zig
+const rhodo = b.dependency("rhodo", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("rhodo", rhodo.module("rhodo"));
+```
 
 ## Notes
 
-- Validation layers are enabled automatically in debug builds (`zig build run`)
-- To build without validation: `zig build run -Doptimize=ReleaseFast`
-- Shaders are recompiled automatically on each build via `dxc`
+- Validation layers are enabled automatically in debug builds
+- Jolt Physics, Dear ImGui, stb_image, and cgltf are vendored under `vendor/`
