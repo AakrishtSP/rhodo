@@ -164,6 +164,11 @@ pub const Renderer = struct {
         self.shader_count = 0;
         self.mesh_count = 0;
 
+        // HIDAPI's hidraw scan SIGILLs on some Linux boxes (bad backend fn pointer
+        // during enumeration) and kills the app before the window exists. Disable
+        // it; the evdev driver still exposes standard gamepads (sticks/buttons).
+        // ponytail: re-enable if you ever need HIDAPI-only features (gyro, lightbar).
+        try sdl.hints.set(.joystick_hidapi, "0");
         try sdl.init(.{ .video = true, .gamepad = true });
         errdefer sdl.shutdown();
 
@@ -452,6 +457,9 @@ pub const Renderer = struct {
             return;
         };
         self.gamepad_id = id;
+        if (self.gamepad.?.getName()) |name| {
+            std.debug.print("Gamepad connected: {s}\n", .{name});
+        } else |_| {}
     }
 
     fn closeGamepad(self: *Renderer, id: sdl.joystick.Id) void {
