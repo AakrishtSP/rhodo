@@ -44,6 +44,28 @@ pub fn build(b: *std.Build) void {
         .flags = &.{},
     });
 
+    // Dear ImGui 1.92 (vendor/imgui): core + SDL3/Vulkan backends + C shim.
+    // The Vulkan backend uses NO_PROTOTYPES + our loader (we don't link
+    // libvulkan); SDL headers are vendored to match our SDL exactly.
+    // ponytail: no demo/widgets beyond the shim. Extend the shim per widget.
+    lib_mod.addIncludePath(b.path("vendor/imgui"));
+    lib_mod.addIncludePath(b.path("vendor/sdl-headers/include"));
+    lib_mod.addIncludePath(b.dependency("vulkan_headers", .{}).path("include"));
+    {
+        const imgui_flags = &.{ "-std=c++17", "-DIMGUI_IMPL_VULKAN_NO_PROTOTYPES" };
+        for ([_][]const u8{
+            "vendor/imgui/imgui.cpp",
+            "vendor/imgui/imgui_draw.cpp",
+            "vendor/imgui/imgui_tables.cpp",
+            "vendor/imgui/imgui_widgets.cpp",
+            "vendor/imgui/backends/imgui_impl_sdl3.cpp",
+            "vendor/imgui/backends/imgui_impl_vulkan.cpp",
+            "vendor/imgui/imgui_shim.cpp",
+        }) |f| {
+            lib_mod.addCSourceFile(.{ .file = b.path(f), .flags = imgui_flags });
+        }
+    }
+
     // Jolt Physics (vendor/jolt/Jolt, file list in vendor/jolt/sources.zig).
     // Excludes Jolt/Renderer/ (its debug renderer; hitboxes go through debug
     // geometry instead). ponytail: ~150 files is a one-time compile, cached

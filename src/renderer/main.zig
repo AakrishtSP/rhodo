@@ -12,6 +12,26 @@ const Camera = @import("../camera.zig").Camera;
 const DebugDraw = @import("debug.zig").DebugDraw;
 const texture_mod = @import("texture.zig");
 
+// Dear ImGui via vendor/imgui/imgui_shim.h (pure C). Re-exported as
+// rhodo.imgui so the sandbox calls it directly with no engine wrapper.
+pub const imgui = @cImport({
+    @cInclude("imgui_shim.h");
+});
+
+// Vulkan loader for ImGui's NO_PROTOTYPES backend. Resolves through our
+// instance proc addr (which also returns device functions).
+var ui_loader_proc: ?vk.PfnGetInstanceProcAddr = null;
+var ui_loader_instance: vk.Instance = .null_handle;
+fn uiVkLoader(name: [*c]const u8, _: ?*anyopaque) callconv(.c) ?*const anyopaque {
+    const p = ui_loader_proc orelse return null;
+    return @ptrCast(p(ui_loader_instance, std.mem.span(name).ptr));
+}
+
+// Vk handles are enums; ImGui takes void*. Same bits, pointer-sized.
+fn vkToPtr(handle: anytype) ?*anyopaque {
+    return @ptrFromInt(@intFromEnum(handle));
+}
+
 const max_frames_in_flight: u32 = 2;
 // ponytail: ceiling 32 textures, one descriptor set each. Bigger pool when needed.
 const max_textures: u32 = 32;
@@ -257,11 +277,15 @@ pub const Renderer = struct {
 
         try self.createSyncObjects();
 
+        try self.initUi();
+        errdefer self.shutdownUi();
+
         return self;
     }
 
     pub fn deinit(self: *Renderer) void {
         self.ctx.device.deviceWaitIdle() catch {};
+        self.shutdownUi();
         if (self.gamepad) |g| g.deinit();
 
         for (self.image_available) |s| self.ctx.device.destroySemaphore(s, null);
@@ -308,7 +332,7 @@ pub const Renderer = struct {
             .null_handle,
         ) catch |err| switch (err) {
             error.OutOfDateKHR => {
-                try self.swapchain.recreate(&self.ctx, self.window, self.shaders[0].pipeline.render_pass);
+                try self.recreateSwapchain();
                 return self.beginFrame();
             },
             else => return err,
@@ -385,7 +409,7 @@ pub const Renderer = struct {
 
         if (self.framebuffer_resized) {
             self.framebuffer_resized = false;
-            try self.swapchain.recreate(&self.ctx, self.window, self.shaders[0].pipeline.render_pass);
+            try self.recreateSwapchain();
         }
 
         self.current_frame = (f + 1) % max_frames_in_flight;
@@ -396,6 +420,11 @@ pub const Renderer = struct {
     // synchronously here, so this is just a notification.
     pub fn notifyResized(self: *Renderer) void {
         self.framebuffer_resized = true;
+    }
+
+    fn recreateSwapchain(self: *Renderer) !void {
+        try self.swapchain.recreate(&self.ctx, self.window, self.shaders[0].pipeline.render_pass);
+        imgui.Imgui_SetMinImageCount(@intCast(self.swapchain.images.len));
     }
 
     // Input codes the engine emits. Kept small on purpose: one variant per key
@@ -430,10 +459,13 @@ pub const Renderer = struct {
 
     // Translate SDL events into the engine's own input vocabulary so game code
     // never imports sdl3. Escape-to-quit is no longer policy here — the sandbox
-    // decides what keys do.
+    // decides what keys do. Every raw event goes to ImGui first (it needs the
+    // untranslated SDL_Event for text/mouse/gamepad UI input).
     pub fn pollEvent(self: *Renderer) ?Event {
-        while (sdl.events.poll()) |event| {
-            switch (event) {
+        var raw: sdl.c.SDL_Event = undefined;
+        while (sdl.c.SDL_PollEvent(&raw)) {
+            _ = imgui.Imgui_ProcessEvent(@ptrCast(&raw));
+            switch (sdl.events.Event.fromSdl(raw)) {
                 .quit, .terminating => return .quit,
                 .window_resized => return .resized,
                 .key_down => |k| {
@@ -543,6 +575,44 @@ pub const Renderer = struct {
     // steer a mouse-look camera, and the escape hatch back to a normal cursor.
     pub fn setMouseCapture(self: *Renderer, enabled: bool) !void {
         return sdl.mouse.setWindowRelativeMode(self.window, enabled);
+    }
+
+    // Dear ImGui backend hookup (engine owns init/shutdown; the sandbox calls
+    // rhodo.imgui directly). Reuses shaders[0]'s render pass + swapchain image
+    // count; the backend creates its own descriptor pool (DescriptorPoolSize).
+    pub fn initUi(self: *Renderer) !void {
+        ui_loader_proc = @ptrCast(sdl.c.SDL_Vulkan_GetVkGetInstanceProcAddr() orelse return error.NoVkGetInstanceProcAddr);
+        ui_loader_instance = self.ctx.instance.handle;
+        const ok = imgui.Imgui_Init(
+            @ptrCast(self.window.value),
+            vkToPtr(self.ctx.instance.handle),
+            vkToPtr(self.ctx.physical_device),
+            vkToPtr(self.ctx.device.handle),
+            self.ctx.queue_families.graphics,
+            vkToPtr(self.ctx.graphics_queue),
+            vkToPtr(self.shaders[0].pipeline.render_pass),
+            @intCast(self.swapchain.images.len),
+            uiVkLoader,
+            null,
+        );
+        if (!ok) return error.ImguiInitFailed;
+    }
+
+    pub fn shutdownUi(self: *Renderer) void {
+        _ = self;
+        imgui.Imgui_Shutdown();
+    }
+
+    // Begin a UI frame (call before sandbox UI code), end records it into cmd
+    // (call after 3D draws, before endFrame — still inside the render pass).
+    pub fn beginUi(self: *Renderer) void {
+        _ = self;
+        imgui.Imgui_NewFrame();
+    }
+
+    pub fn endUi(self: *Renderer) void {
+        const cmd = self.command_buffers[self.current_frame];
+        imgui.Imgui_Render(vkToPtr(cmd));
     }
 
     // Stat every watched shader file; rebuild pipelines whose sources changed.
