@@ -72,7 +72,7 @@ pub fn createLayout(ctx: *const Context, config: Config) !vk.PipelineLayout {
 fn createRenderPass(ctx: *const Context, format: vk.Format) !vk.RenderPass {
     const color_attachment: vk.AttachmentDescription = .{
         .format = format,
-        .samples = .{ .@"1_bit" = true },
+        .samples = .{ .@"1" = true },
         .load_op = .clear,
         .store_op = .store,
         .stencil_load_op = .dont_care,
@@ -82,7 +82,7 @@ fn createRenderPass(ctx: *const Context, format: vk.Format) !vk.RenderPass {
     };
     const depth_attachment: vk.AttachmentDescription = .{
         .format = depth_format,
-        .samples = .{ .@"1_bit" = true },
+        .samples = .{ .@"1" = true },
         .load_op = .clear,
         .store_op = .dont_care,
         .stencil_load_op = .dont_care,
@@ -101,10 +101,10 @@ fn createRenderPass(ctx: *const Context, format: vk.Format) !vk.RenderPass {
     const dependency: vk.SubpassDependency = .{
         .src_subpass = vk.SUBPASS_EXTERNAL,
         .dst_subpass = 0,
-        .src_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
+        .src_stage_mask = .{ .color_attachment_output = true, .early_fragment_tests = true },
         .src_access_mask = .{},
-        .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true, .depth_stencil_attachment_write_bit = true },
+        .dst_stage_mask = .{ .color_attachment_output = true, .early_fragment_tests = true },
+        .dst_access_mask = .{ .color_attachment_write = true, .depth_stencil_attachment_write = true },
     };
 
     const attachments = [_]vk.AttachmentDescription{ color_attachment, depth_attachment };
@@ -135,8 +135,8 @@ pub fn buildPipeline(ctx: *const Context, io: std.Io, layout: vk.PipelineLayout,
     defer ctx.device.destroyShaderModule(frag, null);
 
     const stages = [_]vk.PipelineShaderStageCreateInfo{
-        .{ .stage = .{ .vertex_bit = true }, .module = vert, .p_name = "main" },
-        .{ .stage = .{ .fragment_bit = true }, .module = frag, .p_name = "main" },
+        .{ .stage = .{ .vertex = true }, .module = vert, .p_name = "main" },
+        .{ .stage = .{ .fragment = true }, .module = frag, .p_name = "main" },
     };
     const dynstate = [_]vk.DynamicState{ .viewport, .scissor };
 
@@ -148,7 +148,7 @@ pub fn buildPipeline(ctx: *const Context, io: std.Io, layout: vk.PipelineLayout,
         .src_alpha_blend_factor = .one,
         .dst_alpha_blend_factor = .one_minus_src_alpha,
         .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
     } else .{
         .blend_enable = .false,
         .src_color_blend_factor = .one,
@@ -157,10 +157,10 @@ pub fn buildPipeline(ctx: *const Context, io: std.Io, layout: vk.PipelineLayout,
         .src_alpha_blend_factor = .one,
         .dst_alpha_blend_factor = .zero,
         .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
     };
 
-    var pipeline: vk.Pipeline = .null_handle;
+    var pipeline: vk.Pipeline = .null;
     var pipeline_create_info: vk.GraphicsPipelineCreateInfo = .{
         .stage_count = stages.len,
         .p_stages = &stages,
@@ -177,7 +177,7 @@ pub fn buildPipeline(ctx: *const Context, io: std.Io, layout: vk.PipelineLayout,
             .rasterizer_discard_enable = .false,
             .polygon_mode = .fill,
             .line_width = 1.0,
-            .cull_mode = if (config.cull_back) .{ .back_bit = true } else .{},
+            .cull_mode = if (config.cull_back) .{ .back = true } else .{},
             .front_face = .counter_clockwise,
             .depth_bias_enable = .false,
             .depth_bias_constant_factor = 0.0,
@@ -186,7 +186,7 @@ pub fn buildPipeline(ctx: *const Context, io: std.Io, layout: vk.PipelineLayout,
         },
         .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
             .sample_shading_enable = .false,
-            .rasterization_samples = .{ .@"1_bit" = true },
+            .rasterization_samples = .{ .@"1" = true },
             .min_sample_shading = 0.0,
             .alpha_to_coverage_enable = .false,
             .alpha_to_one_enable = .false,
@@ -216,11 +216,11 @@ pub fn buildPipeline(ctx: *const Context, io: std.Io, layout: vk.PipelineLayout,
         .layout = layout,
         .render_pass = render_pass,
         .subpass = 0,
-        .base_pipeline_handle = .null_handle,
+        .base_pipeline_handle = .null,
         .base_pipeline_index = -1,
     };
 
-    _ = try ctx.device.createGraphicsPipelines(.null_handle, @as(*[1]vk.GraphicsPipelineCreateInfo, &pipeline_create_info), null, @as(*[1]vk.Pipeline, &pipeline));
+    _ = try ctx.device.createGraphicsPipelines(.null, @as(*[1]vk.GraphicsPipelineCreateInfo, &pipeline_create_info), null, @as(*[1]vk.Pipeline, &pipeline));
     return pipeline;
 }
 

@@ -24,7 +24,7 @@ const line_attributes = [_]vk.VertexInputAttributeDescription{
 };
 // Same 64-byte MVP push constant as the mesh pipeline, so flush pushes viewProj.
 const line_push = [_]vk.PushConstantRange{.{
-    .stage_flags = .{ .vertex_bit = true },
+    .stage_flags = .{ .vertex = true },
     .offset = 0,
     .size = @sizeOf(math.Mat4),
 }};
@@ -56,8 +56,8 @@ pub const DebugDraw = struct {
             .buffer = try Buffer.create(
                 ctx,
                 @sizeOf(LineVertex) * max_verts,
-                .{ .vertex_buffer_bit = true },
-                .{ .host_visible_bit = true, .host_coherent_bit = true },
+                .{ .vertex_buffer = true },
+                .{ .host_visible = true, .host_coherent = true },
             ),
         };
     }
@@ -135,6 +135,80 @@ pub const DebugDraw = struct {
         self.line(c010, c011, color);
     }
 
+    fn ring(self: *DebugDraw, center: math.Vec3, u: math.Vec3, v: math.Vec3, radius: f32, color: math.Vec3) void {
+        const n = 20;
+        var prev = center.add(u.scale(radius));
+        for (1..n + 1) |i| {
+            const a = 2 * std.math.pi * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n));
+            const p = center.add(u.scale(@cos(a) * radius)).add(v.scale(@sin(a) * radius));
+            self.line(prev, p, color);
+            prev = p;
+        }
+    }
+
+    fn arc(self: *DebugDraw, center: math.Vec3, up: math.Vec3, side: math.Vec3, radius: f32, color: math.Vec3) void {
+        const n = 8;
+        var prev = center.add(side.scale(radius));
+        for (1..n + 1) |i| {
+            const a = std.math.pi * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n));
+            const p = center.add(side.scale(@cos(a) * radius)).add(up.scale(@sin(a) * radius));
+            self.line(prev, p, color);
+            prev = p;
+        }
+    }
+
+    /// Wire sphere: three great circles.
+    pub fn sphere(self: *DebugDraw, center: math.Vec3, radius: f32, color: math.Vec3) void {
+        self.ring(center, unit_x, unit_y, radius, color);
+        self.ring(center, unit_x, unit_z, radius, color);
+        self.ring(center, unit_y, unit_z, radius, color);
+    }
+
+    /// Upright-around-`axis` cylinder (rotated by the body quat).
+    pub fn cylinder(self: *DebugDraw, center: math.Vec3, axis: math.Vec3, radius: f32, half_height: f32, color: math.Vec3) void {
+        const b = basis(axis);
+        const a = axis.normalize();
+        const top = center.add(a.scale(half_height));
+        const bot = center.sub(a.scale(half_height));
+        self.ring(top, b.u, b.v, radius, color);
+        self.ring(bot, b.u, b.v, radius, color);
+        for ([_]math.Vec3{ b.u, b.u.scale(-1), b.v, b.v.scale(-1) }) |d| {
+            self.line(bot.add(d.scale(radius)), top.add(d.scale(radius)), color);
+        }
+    }
+
+    /// Capsule: two rings, four side lines, and a cap arc per side per plane.
+    pub fn capsule(self: *DebugDraw, center: math.Vec3, axis: math.Vec3, radius: f32, half_height: f32, color: math.Vec3) void {
+        const b = basis(axis);
+        const a = axis.normalize();
+        const top = center.add(a.scale(half_height));
+        const bot = center.sub(a.scale(half_height));
+        self.ring(top, b.u, b.v, radius, color);
+        self.ring(bot, b.u, b.v, radius, color);
+        for ([_]math.Vec3{ b.u, b.u.scale(-1), b.v, b.v.scale(-1) }) |d| {
+            self.line(bot.add(d.scale(radius)), top.add(d.scale(radius)), color);
+        }
+        self.arc(top, a, b.u, radius, color);
+        self.arc(top, a, b.v, radius, color);
+        self.arc(bot, a.scale(-1), b.u, radius, color);
+        self.arc(bot, a.scale(-1), b.v, radius, color);
+    }
+
+    /// Infinite-plane marker: a `size`-wide square plus the normal.
+    pub fn plane(self: *DebugDraw, point: math.Vec3, normal: math.Vec3, size: f32, color: math.Vec3) void {
+        const b = basis(normal);
+        const h = size * 0.5;
+        const c0 = point.add(b.u.scale(-h)).add(b.v.scale(-h));
+        const c1 = point.add(b.u.scale(h)).add(b.v.scale(-h));
+        const c2 = point.add(b.u.scale(h)).add(b.v.scale(h));
+        const c3 = point.add(b.u.scale(-h)).add(b.v.scale(h));
+        self.line(c0, c1, color);
+        self.line(c1, c2, color);
+        self.line(c2, c3, color);
+        self.line(c3, c0, color);
+        self.line(point, point.add(normal.normalize().scale(h * 0.5)), color);
+    }
+
     pub fn flush(self: *DebugDraw, ctx: *const Context, cmd: vk.CommandBuffer, view_proj: math.Mat4) !void {
         if (self.count == 0) return;
         const bytes: vk.DeviceSize = @sizeOf(LineVertex) * self.count;
@@ -143,12 +217,24 @@ pub const DebugDraw = struct {
         ctx.device.unmapMemory(self.buffer.memory);
 
         ctx.device.cmdBindPipeline(cmd, .graphics, self.pipeline.handle);
-        ctx.device.cmdPushConstants(cmd, self.pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &view_proj);
+        ctx.device.cmdPushConstants(cmd, self.pipeline.layout, .{ .vertex = true }, 0, @sizeOf(math.Mat4), &view_proj);
         ctx.device.cmdBindVertexBuffers(cmd, 0, &.{self.buffer.handle}, &.{0});
         ctx.device.cmdDraw(cmd, self.count, 1, 0, 0);
         self.count = 0;
     }
 };
+
+const unit_x = math.Vec3{ .x = 1, .y = 0, .z = 0 };
+const unit_y = math.Vec3{ .x = 0, .y = 1, .z = 0 };
+const unit_z = math.Vec3{ .x = 0, .y = 0, .z = 1 };
+
+/// Two unit vectors perpendicular to `axis` (and each other).
+fn basis(axis: math.Vec3) struct { u: math.Vec3, v: math.Vec3 } {
+    const a = axis.normalize();
+    const ref = if (@abs(a.y) < 0.99) unit_y else unit_x;
+    const u = a.cross(ref).normalize();
+    return .{ .u = u, .v = a.cross(u) };
+}
 
 test "aabb emits 12 edges and overflow is dropped" {
     var d = DebugDraw{ .pipeline = undefined, .buffer = undefined, .count = 0 };
@@ -178,4 +264,22 @@ test "obb with identity rotation matches aabb corners" {
     try std.testing.expectEqual(@as(u32, 24), d.count);
     try std.testing.expectEqual(math.Vec3{ .x = -1, .y = -1, .z = -1 }, d.verts[0].pos);
     try std.testing.expectEqual(math.Vec3{ .x = 1, .y = -1, .z = -1 }, d.verts[1].pos);
+}
+
+test "shape gizmos emit even line counts" {
+    var d = DebugDraw{ .pipeline = undefined, .buffer = undefined, .count = 0 };
+    d.sphere(.{ .x = 0, .y = 0, .z = 0 }, 1, unit_x);
+    try std.testing.expectEqual(@as(u32, 3 * 20 * 2), d.count);
+
+    d.count = 0;
+    d.cylinder(.{ .x = 0, .y = 0, .z = 0 }, unit_y, 1, 1, unit_x);
+    try std.testing.expectEqual(@as(u32, (2 * 20 + 4) * 2), d.count);
+
+    d.count = 0;
+    d.capsule(.{ .x = 0, .y = 0, .z = 0 }, unit_y, 1, 1, unit_x);
+    try std.testing.expectEqual(@as(u32, (2 * 20 + 4 + 4 * 8) * 2), d.count);
+
+    d.count = 0;
+    d.plane(.{ .x = 0, .y = 0, .z = 0 }, unit_y, 10, unit_x);
+    try std.testing.expectEqual(@as(u32, 5 * 2), d.count);
 }

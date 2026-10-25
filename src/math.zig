@@ -78,7 +78,7 @@ pub const Mat4 = struct {
     // Vulkan clip space: depth 0..1, Y flipped (negated m[1][1]).
     pub fn perspective(fovy_rad: f32, aspect: f32, near: f32, far: f32) Mat4 {
         const f = 1.0 / @tan(fovy_rad / 2.0);
-        var r: Mat4 = .{ .m = .{0} ** 16 };
+        var r: Mat4 = .{ .m = @splat(0) };
         r.m[0] = f / aspect;
         r.m[5] = -f;
         r.m[10] = far / (near - far);
@@ -113,7 +113,7 @@ pub const Mat4 = struct {
     // Vulkan orthographic: x maps left..right to -1..1, y maps bottom..top to
     // +1..-1 (world +Y up, matching perspective), z maps near..far to 0..1.
     pub fn orthographic(l: f32, r: f32, b: f32, t: f32, n: f32, f: f32) Mat4 {
-        var m: Mat4 = .{ .m = .{0} ** 16 };
+        var m: Mat4 = .{ .m = @splat(0) };
         m.m[0] = 2.0 / (r - l);
         m.m[5] = 2.0 / (b - t);
         m.m[10] = 1.0 / (f - n);
@@ -133,7 +133,7 @@ pub const Mat4 = struct {
     }
 
     pub fn scale(x: f32, y: f32, z: f32) Mat4 {
-        var m: Mat4 = .{ .m = .{0} ** 16 };
+        var m: Mat4 = .{ .m = @splat(0) };
         m.m[0] = x;
         m.m[5] = y;
         m.m[10] = z;
@@ -195,8 +195,8 @@ pub const Mat4 = struct {
         const sy = t.scale.y;
         const sz = t.scale.z;
         return .{ .m = .{
-            (1 - 2 * (yy + zz)) * sx, 2 * (xy + wz) * sx,     2 * (xz - wy) * sx,     0,
-            2 * (xy - wz) * sy,       (1 - 2 * (xx + zz)) * sy, 2 * (yz + wx) * sy,     0,
+            (1 - 2 * (yy + zz)) * sx, 2 * (xy + wz) * sx,       2 * (xz - wy) * sx,       0,
+            2 * (xy - wz) * sy,       (1 - 2 * (xx + zz)) * sy, 2 * (yz + wx) * sy,       0,
             2 * (xz + wy) * sz,       2 * (yz - wx) * sz,       (1 - 2 * (xx + yy)) * sz, 0,
             t.pos.x,                  t.pos.y,                  t.pos.z,                  1,
         } };

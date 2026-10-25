@@ -23,7 +23,7 @@ while (running) {
     renderer.pollShaderChanges();          // hot-reload, no-op when clean
     const dt = ...;                        // seconds since last frame
     rhodo.Physics.step(@min(dt, 1.0 / 30.0));
-    sim.sync(rhodo.transforms[0..]);
+    sim.sync();
 
     try renderer.beginFrame();
     renderer.setCamera(cam);
@@ -49,9 +49,12 @@ inside the render pass (before `endFrame`); debug lines flush automatically at
   (unlit white). Shader 0 (`mesh_vert`+`lit_frag`) is loaded by `init`.
 - `uploadMesh(mesh.Mesh) !MeshHandle` — host-visible vertex+index buffers.
   Frees the CPU `Mesh` after upload.
+- `uploadModel(mesh.Mesh, color: Vec4) !Model` — upload + color in one call
+  (the usual path for a visual).
 - `drawMesh(shader, mesh, transform: Mat4)` — unlit/custom pipelines (flat
   ground). `drawMeshTinted(mesh, color: Vec4, transform)` / `drawModel(model,
   transform)` — lit + RGBA tint via shader 0 (96B MVP+color+light push).
+  `drawBody(sim, handle, model)` uses that body's last synced transform.
   `Model = { mesh, color }` bundles both; `texture` and skeletal/keyframe
   runtime join when a textured/animated glTF arrives (physics + procedural
   cover motion).
@@ -59,10 +62,13 @@ inside the render pass (before `endFrame`); debug lines flush automatically at
 - `setLight(dir: Vec3, ambient: f32)` — scene sun bound like the camera
   (direction normalized, ambient clamped 0..1); folded into lit draws.
   One directional only; point lights + fog arrive with atmosphere work.
-- `Camera` (`src/camera.zig`) — `pos`, `yaw`/`pitch` (radians), `fov_y`,
-  `near=0.1`, `far=100`. `forward()`, `view()`, `projection(aspect)`.
-- `rhodo.transforms: [1024]Transform` — physics writes here; render with
-  `Mat4.fromTransform(t)`. `Transform = { pos: Vec3, rot: Vec4(quat), scale }`.
+- `Camera` (`src/camera.zig`) — `pos`, `yaw`/`pitch` (radians), `pitch_min`/
+  `pitch_max` (clamped by `addLook`), `fov_y`, `near=0.1`, `far=100`.
+  `forward()`, `view()`, `projection(aspect)`, `addLook(input, dt, .{})`
+  (mouse while the keyboard device is live + right stick), `orbit(target,
+  distance)` (places the camera behind its look direction, aimed at target).
+- `sim.transform(handle)` — last synced `Transform = { pos, rot(quat), scale }`
+  (scale = shape bounds).
 - `loadTexture(path) !TextureHandle`, `drawSprite(tex, transform: Mat4)` —
   see 2D below.
 
@@ -91,20 +97,72 @@ World space. No-op when empty.
 
 ## Physics (`src/physics.zig`, Jolt v5.6 via `vendor/jolt/jolt_shim.h`)
 
-- `Physics.init/deinit` — 2-layer world (static/dynamic), 1024 bodies,
+- `Physics.init/deinit` — 2-layer world (non-moving/moving), 1024 bodies,
   thread-pool job system, 10MB temp allocator.
-- `addBox(pos, half, is_static) !BodyHandle` — axis-aligned box. Boxes only.
-- `removeBox(handle)` — Jolt remove + destroy (tombstone; slots leak until
+- `addBox(pos, half, body_type)`, `addSphere(pos, radius)`,
+  `addCapsule(pos, radius, half_height)`, `addCylinder(pos, radius,
+  half_height)` — all take `body_type` last. Capsules/cylinders are upright
+  (Y); `half_height` is the straight section's half height, radius excluded.
+- `addPlane(pos, normal, .static)` — infinite plane through `pos`; the only
+  useful body type (a moving plane makes no sense). Its transform scale is a
+  unit marker, so draw your own floor quad.
+- `BodyType` = `.static` (never moves), `.kinematic` (moved by the game,
+  ignores gravity, pushes dynamic bodies), `.dynamic` (simulated). Kinematic and
+  static share the non-moving layer, so a platform pushes but is never pushed.
+- `setVelocity(handle, vel)` — drive a kinematic platform or dynamic body;
+  static ignores it.
+- `removeBody(handle)` — Jolt remove + destroy (tombstone; slots leak until
   restart resets all).
+- `setTrigger(handle, true)` — make a **sensor**: no contact response (bodies
+  pass through), still found by `overlaps`. Newly-set triggers recolor yellow
+  (see `setColor`).
+- `overlaps(handle, out: []BodyHandle) []BodyHandle` — bodies whose shape
+  intersects this one (self excluded). This is how triggers detect what is
+  inside them; solid bodies are included, so the game filters by its own
+  vocabulary. Cheap shape query, call once per trigger per frame after `step`.
+- `setColor(handle, Vec4)` — collider **gizmo** color only (never the sim).
+  Defaults: static grey, kinematic blue, dynamic green, trigger yellow
+  (`rhodo.collider_colors`). Hitbox/hurtbox = just colors you pick, e.g. red
+  for damage dealers, green for damage takers.
 - `step(dt)` — variable dt (clamped by caller); no fixed timestep.
-- `sync(transforms)` — writes pos/quat/scale (`scale = half` so
-  the −1..1 cube mesh matches), skipping removed bodies internally. No
-  velocity setters, no contacts, no other shapes.
+- `sync(transforms)` — writes pos/quat/scale, skipping removed bodies. `scale`
+  is the shape's bounds (`box` half extent, capsule `(r, h+r, r)`, cylinder
+  `(r, h, r)`, sphere `(r,r,r)`), so a unit mesh draws the shape without
+  per-shape branching. No contacts/events, no impulses, no hull/mesh shapes.
+- `renderer.drawColliders(&sim)` — wireframe every live collider with its
+  color, using the transforms from the last `sync()`. Colliders are **not** rendered
+  by default: a body with no mesh is invisible until this is on. A mesh with
+  no body is simply a draw call with your own `Mat4`. The two are independent.
+  `sim.bodies[i]` is public (`id, kind, scale, normal, color, alive`).
+  Characters aren't bodies: draw theirs with `renderer.drawCapsule(pos, axis,
+  radius, half_height, color)`.
+
+### Characters (`CharacterVirtual` capsule)
+
+```zig
+const ch = try sim.addCharacter(center, radius, half_height); // center = capsule middle
+var vy: f32 = 0;
+vy -= 9.81 * dt;                                   // game-owned gravity
+const s = sim.moveCharacter(ch, .{ .x = vx, .y = vy, .z = vz }, dt);
+if (s.grounded) vy = 0;                            // s.pos = new center
+sim.removeCharacter(ch);
+```
+
+- Not a rigid body: no mass, never falls on its own. The game owns gravity,
+  jump, acceleration and air control; the engine owns collide-and-slide,
+  stair stepping (0.4), slope limit (50°), stick-to-floor (0.5) and the
+  `grounded` flag.
+- The velocity passed to `moveCharacter` must already include gravity — the
+  engine adds none (no double gravity, no fighting the game's jump feel).
+- Capsule center is the input/output position (same convention as bodies);
+  the shim converts to Jolt's feet-at-origin shape internally.
+- Up to 8 characters per `Physics`; no character-vs-character collision.
 
 Game objects are per-type structs over these registries (e.g. a `Prop`
-`{body, model, hitbox}` with a `spawn` constructor + `drawable()` accessor),
-not engine entities — behavior state (HP, cooldowns) lives with the struct,
-shared aspects (transforms, meshes, bodies) stay flat and index-addressed.
+`{body, model: ?Model}` with a `spawn` constructor), not engine entities —
+behavior state (HP, cooldowns) lives with the struct, shared aspects
+(transforms, meshes, bodies) stay flat and index-addressed. `model = null` is
+a collider-only object; a mesh drawn without a prop is render-only.
 
 ## Audio (`src/audio.zig`)
 
@@ -121,18 +179,49 @@ manages the gamepad slot). Requires SDL initialized (`Renderer.init`).
 
 - `beginFrame()` — clears edge flags + mouse delta. `poll() ?Event` — returns
   `quit`/`resized` only; keys/buttons/axes fold into state (not returned).
-- Queries: `isDown`, `isJustPressed`, `isJustReleased` (per-frame edges),
-  `axisValue` (sticks −1..1), `mouse_dx/dy` (relative pixels). `deinit`
-  closes the gamepad.
-- `KeyCode` — bound keyboard scancodes, gamepad buttons (positional
-  `pad_south`…), stick axes. One gamepad slot (first wins, hot-plug).
+- Raw queries: `isPressed`, `isJustPressed` (first frame only — OS auto-repeat
+  never re-fires it), `isJustReleased`, `isRepeated` (auto-repeat frames while
+  held), `axisValue` (raw −1..1, triggers 0..1), `axisStrength` (deadzoned,
+  rescaled, signed), `mouse_dx/dy` (relative pixels). `deinit` closes the pad.
+- `Key` / `PadButton` / `PadAxis` — the full SDL sets re-exported, so every key,
+  pad button and axis is available with no per-key engine work. Pad names are
+  positional (`pad_south` = PS cross / Xbox A). One pad slot (first wins,
+  hot-plug); unplug clears its state.
+- Focus loss clears all held keys/buttons/axes — no stuck movement after
+  alt-tab (SDL never delivers the matching releases).
+
+### Actions (`setMap`, Godot-style InputMap)
+
+Map readable names to physical controls once, then query by name:
+
+```zig
+const actions = .{
+    .move_forward = &[_]rhodo.Binding{
+        .{ .key = .w },
+        .{ .pad_button = .dpad_up },
+        .{ .pad_axis = .{ .axis = .left_y, .dir = -1 } }, // stick read as a direction
+    },
+};
+input.setMap(actions);   // comptime table: field names are the action names
+```
+
+`setMap` takes a comptime struct keyed by action name and flattens it at compile
+time — no strings and no runtime table to own. `.move_forward` in the map and
+`.move_forward` at the call site are the same name.
+
+- `isActionPressed`, `isActionJustPressed`, `isActionJustReleased`,
+  `isActionRepeated`, `actionStrength` (digital bindings read 1.0; sticks carry
+  magnitude after the deadzone). Take the action as a string or an enum /
+  enum literal — `.move_forward` and `"move_forward"` are the same lookup, so
+  call sites read like Godot's `is_action_pressed` without a constant table.
+- `Binding` = `.key`, `.pad_button`, or `.pad_axis{ axis, dir }` (`dir` -1 for
+  up/left, 1 for down/right). `input.deadzone` is the tuning knob (default 0.25).
+- `input.devices.keyboard` / `.pad` gate *action* queries only: set
+  `.keyboard = captured and !ui_busy` so keys don't drive the world behind a UI,
+  while the pad (never a UI pointer) keeps working. Raw queries ignore these.
+- Unmapped action names assert in debug builds (typo guard).
 - `Renderer.setMouseCapture(bool)` — relative mode for mouse-look (window
   property, stays on renderer).
-
-Sandbox convention (`sandbox/input.zig`, game-owned): `Action` enum mapped to
-`[]const KeyCode` with thin `isPressed/isJustPressed` queries over engine
-state. Per-device routing: mouse + keys drive only when captured, sticks
-always drive (gamepad is never a UI pointer).
 
 ## UI (`rhodo.imgui`, Dear ImGui 1.92 via `vendor/imgui/imgui_shim.h`)
 
@@ -162,7 +251,21 @@ orthographic/translate/scale/fromTransform/orientedBoxAabb`).
 ## Mesh loading (`src/renderer/mesh.zig`)
 
 `loadGltf(allocator, path) !Mesh` (cgltf, concatenates all primitives, ignores
-node hierarchy), `cube(allocator)` (2-unit, 24 verts). `Vertex{pos, normal}`.
+node hierarchy), `Vertex{pos, normal}`.
+
+Procedural primitives, matching the collider shapes — no assets needed:
+
+- `cube(allocator)` — unit, `[-1,1]` on every axis.
+- `sphere(allocator)` — radius 1.
+- `cylinder(allocator)` — radius 1, half height 1.
+- `quad(allocator)` — `[-1,1]` in XZ at `y=0`, normal +Y (ground/plane).
+- `capsule(allocator, radius, half_height)` — **sized**, not unit: a unit
+  capsule cannot be non-uniformly scaled without distorting its caps. Build it
+  at the body size and draw with `Mat4.translate`/rotation, scale 1.
+
+Mesh vs collider is the game's choice: unit mesh + `Mat4.fromTransform(transforms[i])`
+draws a body exactly (the sync's scale is the shape bounds); anything else is
+just a mesh drawn at a transform of your own.
 
 ## Audio
 

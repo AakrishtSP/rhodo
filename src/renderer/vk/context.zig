@@ -8,12 +8,12 @@ const BaseDispatch = vk.BaseWrapper;
 const InstanceDispatch = vk.InstanceWrapper;
 const DeviceDispatch = vk.DeviceWrapper;
 
-const enable_validation = builtin.mode == .Debug;
+const enable_validation = builtin.mode == .debug;
 const validation_layers: []const [*:0]const u8 = if (enable_validation)
     &.{"VK_LAYER_KHRONOS_validation"}
 else
     &.{};
-const device_extensions: []const [*:0]const u8 = &.{vk.extensions.khr_swapchain.name};
+const device_extensions: []const [*:0]const u8 = &.{vk.device_extensions.khr_swapchain.name};
 
 pub const QueueFamilyIndices = struct {
     graphics: u32,
@@ -101,8 +101,8 @@ pub const Context = struct {
     }
 
     fn createSurface(self: *Context, window: sdl.video.Window) !void {
-        var surface: vk.SurfaceKHR = .null_handle;
-        if (!sdl.c.SDL_Vulkan_CreateSurface(window.value, @ptrFromInt(@intFromEnum(self.instance.handle)), null, @ptrCast(&surface))) {
+        var surface: vk.SurfaceKHR = .null;
+        if (!sdl.c.SDL_Vulkan_CreateSurface(window.value, @ptrCast(self.instance.handle), null, @ptrCast(&surface))) {
             std.debug.print("SDL_Vulkan_CreateSurface failed: {s}\n", .{sdl.c.SDL_GetError()});
             return error.SurfaceCreationFailed;
         }
@@ -166,7 +166,7 @@ pub const Context = struct {
         var present: ?u32 = null;
         for (families, 0..) |fam, i| {
             const idx: u32 = @intCast(i);
-            if (fam.queue_flags.graphics_bit) graphics = idx;
+            if (fam.queue_flags.graphics) graphics = idx;
             const support = try self.instance.getPhysicalDeviceSurfaceSupportKHR(pd, idx, self.surface);
             if (support == .true) present = idx;
             if (graphics != null and present != null) break;

@@ -81,6 +81,42 @@ pub fn build(b: *std.Build) void {
     lib_mod.addImport("vulkan", vulkan.module("vulkan-zig"));
     lib_mod.addImport("sdl3", sdl3.module("sdl3"));
 
+    // C bindings via build-system translate-c. @cImport is forbidden in project
+    // code; translation also happens per-target at build time anyway.
+    const jolt_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/jolt/jolt_shim.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    jolt_c.addIncludePath(jolt_dep.path("."));
+    jolt_c.addIncludePath(b.path("vendor/jolt"));
+    lib_mod.addImport("jolt", jolt_c.createModule());
+
+    const cgltf_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/cgltf/cgltf.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cgltf_c.addIncludePath(b.path("vendor/cgltf"));
+    lib_mod.addImport("cgltf", cgltf_c.createModule());
+
+    const stb_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/stb/stb_image.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    stb_c.addIncludePath(b.path("vendor/stb"));
+    lib_mod.addImport("stb", stb_c.createModule());
+
+    const imgui_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/imgui/imgui_shim.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    imgui_c.addIncludePath(imgui_dep.path("."));
+    imgui_c.addIncludePath(b.path("vendor/imgui"));
+    lib_mod.addImport("imgui", imgui_c.createModule());
+
     const mod_tests = b.addTest(.{
         .root_module = lib_mod,
     });

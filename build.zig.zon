@@ -2,16 +2,16 @@
     .name = .rhodo,
     .version = "0.0.0",
     .fingerprint = 0x24b5c529a0f0ae3f,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
 
     .dependencies = .{
         .sdl3 = .{
-            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=v0.2.0#40c2e4b579aa556db37a502c936426aa1c8b5c95",
-            .hash = "sdl3-0.2.0-NmT1Q0mFJwBi9kZmArzh2rfJ_mFshydV0zPGULVlpACc",
+            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=v0.2.3#666331118c8f7d8a03ea633d79a343c34dc32b84",
+            .hash = "sdl3-0.2.3-NmT1Q1QDKgACd5t_PNSG08lcOCX25qaRYZjUmXPTVBY_",
         },
         .vulkan = .{
-            .url = "git+https://github.com/Snektron/vulkan-zig#f75b0011214705d6593e6ad64948c4832b1e6f27",
-            .hash = "vulkan-0.0.0-r7Ytx759AwBNdwE-gHKt3vzRQaU7RFerBg3FmD7iTEv4",
+            .url = "git+https://github.com/Snektron/vulkan-zig#91a3537868952be63763db2b0725bcf9cf7f0d93",
+            .hash = "vulkan-0.0.0-r7Ytx1eHAwDInvlQSbl5gMYemczKJa6GimvWcgnOjibX",
         },
         .vulkan_headers = .{
             .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#8864cdc896bbc2a9b6eb36b3218fc9ef57908d77",
@@ -29,8 +29,8 @@
             .hash = "N-V-__8AAPoXegDDrlBN-ExdeEp0KuI2CudplLDeaVyigil4",
         },
         .sdl = .{
-            .url = "https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.2.tar.gz",
-            .hash = "N-V-__8AAGdF8wKsT6nK_zxmg0nzMsNPfarxHfO_bLRsmyJ3",
+            .url = "git+https://github.com/castholm/SDL?ref=v0.6.0%2B3.4.18#dbcb19aa3583c318556ecae3ecbeb29b102d37c5",
+            .hash = "sdl-0.6.0+3.4.18-SDL--p-gqAGWpnfTLlhs0dgjDtc4P4_CHeNLGY_SX_Fv",
         },
     },
     .paths = .{

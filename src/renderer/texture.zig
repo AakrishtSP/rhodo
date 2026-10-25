@@ -3,9 +3,7 @@ const vk = @import("vulkan");
 const Context = @import("vk/context.zig").Context;
 const buffer_mod = @import("vk/buffer.zig");
 const Buffer = buffer_mod.Buffer;
-const stb = @cImport({
-    @cInclude("stb_image.h");
-});
+const stb = @import("stb");
 
 // RGBA pixels uploaded to a sampled, optimal-tiled VkImage. Load with load()
 // (stb_image, forced to 4 channels, SRGB so sampled colors look right); free
@@ -43,7 +41,7 @@ pub fn load(ctx: *const Context, pool: vk.CommandPool, path: [:0]const u8) !Text
 
     const staging = try Buffer.hostVisibleWith(
         ctx,
-        .{ .transfer_src_bit = true },
+        .{ .transfer_src = true },
         u8,
         @as([*]u8, @ptrCast(pixels))[0..byte_count],
     );
@@ -55,9 +53,9 @@ pub fn load(ctx: *const Context, pool: vk.CommandPool, path: [:0]const u8) !Text
         .extent = .{ .width = width, .height = height, .depth = 1 },
         .mip_levels = 1,
         .array_layers = 1,
-        .samples = .{ .@"1_bit" = true },
+        .samples = .{ .@"1" = true },
         .tiling = .optimal,
-        .usage = .{ .transfer_dst_bit = true, .sampled_bit = true },
+        .usage = .{ .transfer_dst = true, .sampled = true },
         .sharing_mode = .exclusive,
         .initial_layout = .undefined,
     }, null);
@@ -66,21 +64,19 @@ pub fn load(ctx: *const Context, pool: vk.CommandPool, path: [:0]const u8) !Text
     const reqs = ctx.device.getImageMemoryRequirements(image);
     const memory = try ctx.device.allocateMemory(&.{
         .allocation_size = reqs.size,
-        .memory_type_index = try buffer_mod.findMemoryType(ctx, reqs.memory_type_bits, .{ .device_local_bit = true }),
+        .memory_type_index = try buffer_mod.findMemoryType(ctx, reqs.memory_type_bits, .{ .device_local = true }),
     }, null);
     errdefer ctx.device.freeMemory(memory, null);
     try ctx.device.bindImageMemory(image, memory, 0);
 
     const cmd = try buffer_mod.beginSingleTime(ctx, pool);
-    transition(ctx, cmd, image, .undefined, .transfer_dst_optimal,
-        .{}, .{ .transfer_write_bit = true },
-        .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true });
+    transition(ctx, cmd, image, .undefined, .transfer_dst_optimal, .{}, .{ .transfer_write = true }, .{ .top_of_pipe = true }, .{ .transfer = true });
     ctx.device.cmdCopyBufferToImage(cmd, staging.handle, image, .transfer_dst_optimal, &.{.{
         .buffer_offset = 0,
         .buffer_row_length = 0,
         .buffer_image_height = 0,
         .image_subresource = .{
-            .aspect_mask = .{ .color_bit = true },
+            .aspect_mask = .{ .color = true },
             .mip_level = 0,
             .base_array_layer = 0,
             .layer_count = 1,
@@ -88,9 +84,7 @@ pub fn load(ctx: *const Context, pool: vk.CommandPool, path: [:0]const u8) !Text
         .image_offset = .{ .x = 0, .y = 0, .z = 0 },
         .image_extent = .{ .width = width, .height = height, .depth = 1 },
     }});
-    transition(ctx, cmd, image, .transfer_dst_optimal, .shader_read_only_optimal,
-        .{ .transfer_write_bit = true }, .{ .shader_read_bit = true },
-        .{ .transfer_bit = true }, .{ .fragment_shader_bit = true });
+    transition(ctx, cmd, image, .transfer_dst_optimal, .shader_read_only_optimal, .{ .transfer_write = true }, .{ .shader_read = true }, .{ .transfer = true }, .{ .fragment_shader = true });
     try buffer_mod.endSingleTime(ctx, pool, cmd);
 
     const view = try ctx.device.createImageView(&.{
@@ -99,7 +93,7 @@ pub fn load(ctx: *const Context, pool: vk.CommandPool, path: [:0]const u8) !Text
         .format = .r8g8b8a8_srgb,
         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
         .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
+            .aspect_mask = .{ .color = true },
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,
@@ -156,7 +150,7 @@ fn transition(
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .image = image,
         .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
+            .aspect_mask = .{ .color = true },
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,
@@ -165,12 +159,14 @@ fn transition(
     }});
 }
 
-// CPU-only: proves stb links and decodes, without touching the GPU.
+// CPU-only: proves stb links and decodes, without touching the GPU. The PNG is
+// embedded so the test doesn't depend on the working directory.
 test "stb decodes the test sprite as 64x64 RGBA" {
+    const png = @embedFile("sprite_test.png");
     var w: c_int = 0;
     var h: c_int = 0;
     var channels: c_int = 0;
-    const pixels = stb.stbi_load("assets/sprite_test.png".ptr, &w, &h, &channels, 4) orelse return error.ImageLoadFailed;
+    const pixels = stb.stbi_load_from_memory(png.ptr, @intCast(png.len), &w, &h, &channels, 4) orelse return error.ImageLoadFailed;
     defer stb.stbi_image_free(pixels);
     try std.testing.expectEqual(@as(c_int, 64), w);
     try std.testing.expectEqual(@as(c_int, 64), h);

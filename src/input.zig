@@ -2,40 +2,89 @@ const std = @import("std");
 const sdl = @import("sdl3");
 const imgui = @import("imgui.zig").imgui;
 
-// Engine input codes. One variant per key/button/axis games bind. ponytail:
-// add a variant + a case in the matching keyCode()/padButtonCode()/axisCode()
-// per new binding; mirror SDL's full sets only for free rebinding.
-pub const KeyCode = enum {
-    // keyboard scancodes
-    w, a, s, d, f, g, space, left_shift, escape,
-    // gamepad buttons (SDL positional; PS4 = south:cross, east:circle, west:square, north:triangle)
-    pad_south, pad_east, pad_west, pad_north,
-    pad_dpad_up, pad_dpad_down, pad_dpad_left, pad_dpad_right,
-    pad_l1, pad_r1, pad_start,
-    // gamepad axes
-    axis_left_x, axis_left_y, axis_right_x, axis_right_y,
-};
+// Full input enums are re-exported from SDL instead of mirrored by hand: the
+// sets are large, sparse, and grow with SDL. This bends the "no sdl types in
+// the public API" rule for these three enums only — game code still never
+// imports sdl3 itself.
+pub const Key = sdl.Scancode;
+pub const PadButton = sdl.gamepad.Button;
+pub const PadAxis = sdl.gamepad.Axis;
 
-const key_count = @typeInfo(KeyCode).@"enum".fields.len;
+const key_count = maxTag(Key) + 1;
+const button_count = maxTag(PadButton) + 1;
+const axis_count = maxTag(PadAxis) + 1;
+
+fn maxTag(comptime E: type) usize {
+    var max: usize = 0;
+    for (@typeInfo(E).@"enum".field_values) |v| max = @max(max, @as(usize, @intCast(v)));
+    return max;
+}
+
+fn idx(x: anytype) usize {
+    return @intCast(@backingInt(x));
+}
 
 // Window-level events. Key/mouse/gamepad input is consumed into Input state,
-// not returned — query it with isDown/isJustPressed/axisValue.
+// not returned — query it with isPressed/isJustPressed/action queries.
 pub const Event = union(enum) {
     quit,
     resized,
 };
 
+/// One physical control that can drive an action.
+pub const Binding = union(enum) {
+    key: Key,
+    pad_button: PadButton,
+    /// Stick axis read as a digital direction: `dir` -1 (negative side, e.g.
+    /// stick up) or 1 (positive side). Triggers only ever push positive.
+    pad_axis: struct { axis: PadAxis, dir: f32 = 1 },
+};
+
+/// Flattened action row (name + controls); built from the game's comptime map.
+const Action = struct {
+    name: []const u8,
+    bindings: []const Binding,
+};
+
+/// Per-device gates applied to *action* queries only (raw key/axis queries
+/// always see everything). A game with a UI sets `.keyboard = captured` so keys
+/// don't drive the world while a text field or ImGui window has focus.
+pub const Devices = packed struct {
+    keyboard: bool = true,
+    pad: bool = true,
+};
+
 // Polled input state, owned by game code (`var input: rhodo.Input = .{}`).
-// beginFrame() clears edges + mouse delta; poll() drains SDL (feeding ImGui
+// beginFrame() clears edges + mouse delta, poll() drains SDL (feeding ImGui
 // first), manages the gamepad slot, and folds keys/buttons/axes into state.
 // Requires SDL initialized (Renderer.init does it).
 pub const Input = struct {
-    down: [key_count]bool = .{false} ** key_count,
-    pressed: [key_count]bool = .{false} ** key_count,
-    released: [key_count]bool = .{false} ** key_count,
-    analog: [key_count]f32 = .{0} ** key_count,
+    key_down: [key_count]bool = @splat(false),
+    key_pressed: [key_count]bool = @splat(false),
+    key_released: [key_count]bool = @splat(false),
+    /// OS auto-repeat landed on this frame (held key "just pressed" again).
+    key_repeated: [key_count]bool = @splat(false),
+
+    btn_down: [button_count]bool = @splat(false),
+    btn_pressed: [button_count]bool = @splat(false),
+    btn_released: [button_count]bool = @splat(false),
+
+    axes: [axis_count]f32 = @splat(0),
+    /// Axis values as of the end of last frame, for analog edge detection.
+    axes_prev: [axis_count]f32 = @splat(0),
+
     mouse_dx: f32 = 0,
     mouse_dy: f32 = 0,
+
+    /// Stick center wobble threshold, rescaled out of the output. Real pads
+    /// drift a few percent; 0.25 is safe but wasteful travel — tune per game.
+    deadzone: f32 = 0.25,
+
+    devices: Devices = .{},
+
+    // ponytail: setMap keeps the game's table by reference (comptime const in
+    // practice); copy it if actions are ever built at runtime.
+    actions: []const Action = &.{},
 
     // ponytail: one pad only; multi-controller when a game needs player 2.
     gamepad: ?sdl.gamepad.Gamepad = null,
@@ -47,9 +96,32 @@ pub const Input = struct {
         self.gamepad_id = null;
     }
 
+    /// Map actions to controls. `map` is a comptime struct whose field names are
+    /// the action names:
+    ///
+    /// ```zig
+    /// const actions = .{
+    ///     .move_forward = &[_]rhodo.Binding{ .{ .key = .w } },
+    /// };
+    /// input.setMap(actions);
+    /// ```
+    pub fn setMap(self: *Input, comptime map: anytype) void {
+        const names = @typeInfo(@TypeOf(map)).@"struct".field_names;
+        const table = comptime blk: {
+            var rows: [names.len]Action = undefined;
+            for (names, 0..) |name, i| rows[i] = .{ .name = name, .bindings = @field(map, name) };
+            break :blk rows;
+        };
+        self.actions = &table;
+    }
+
     pub fn beginFrame(self: *Input) void {
-        self.pressed = .{false} ** key_count;
-        self.released = .{false} ** key_count;
+        self.key_pressed = @splat(false);
+        self.key_released = @splat(false);
+        self.key_repeated = @splat(false);
+        self.btn_pressed = @splat(false);
+        self.btn_released = @splat(false);
+        self.axes_prev = self.axes;
         self.mouse_dx = 0;
         self.mouse_dy = 0;
     }
@@ -61,8 +133,14 @@ pub const Input = struct {
             switch (sdl.events.Event.fromSdl(raw)) {
                 .quit, .terminating => return .quit,
                 .window_resized => return .resized,
-                .key_down => |k| self.setKey(keyCode(k.scancode), true),
-                .key_up => |k| self.setKey(keyCode(k.scancode), false),
+                // Losing focus never delivers the matching key_up, so held
+                // keys would stick forever. Drop everything; replaying state
+                // is the OS's job (SDL re-sends focus/key events on regain).
+                .window_focus_lost => self.clearAll(),
+                .key_down => |k| if (k.scancode) |key|
+                    self.setKey(key, if (k.repeat) .repeat else .press),
+                .key_up => |k| if (k.scancode) |key|
+                    self.setKey(key, .release),
                 .mouse_motion => |m| {
                     self.mouse_dx += m.x_rel;
                     self.mouse_dy += m.y_rel;
@@ -71,57 +149,191 @@ pub const Input = struct {
                 .gamepad_removed => |dev| self.closeGamepad(dev.id),
                 .gamepad_axis_motion => |a| {
                     if (!self.isActivePad(a.id)) continue;
-                    if (axisCode(a.axis)) |axis| {
-                        self.analog[@intFromEnum(axis)] = @as(f32, @floatFromInt(a.value)) / 32767.0;
-                    }
+                    self.axes[idx(a.axis)] = clampAxis(@as(f32, @floatFromInt(a.value)) / 32767.0);
                 },
-                .gamepad_button_down => |b| {
-                    if (!self.isActivePad(b.id)) continue;
-                    self.setKey(padButtonCode(b.button), true);
-                },
-                .gamepad_button_up => |b| {
-                    if (!self.isActivePad(b.id)) continue;
-                    self.setKey(padButtonCode(b.button), false);
-                },
+                .gamepad_button_down => |b| if (self.isActivePad(b.id)) self.setButton(b.button, true),
+                .gamepad_button_up => |b| if (self.isActivePad(b.id)) self.setButton(b.button, false),
                 else => continue,
             }
         }
         return null;
     }
 
-    pub fn isDown(self: Input, key: KeyCode) bool {
-        return self.down[@intFromEnum(key)];
+    // --- raw queries -------------------------------------------------------
+
+    /// Held down right now.
+    pub fn isPressed(self: Input, key: Key) bool {
+        return self.key_down[idx(key)];
     }
 
-    pub fn isJustPressed(self: Input, key: KeyCode) bool {
-        return self.pressed[@intFromEnum(key)];
+    /// First frame of a press. OS auto-repeat does not count — use isRepeated.
+    pub fn isJustPressed(self: Input, key: Key) bool {
+        return self.key_pressed[idx(key)];
     }
 
-    pub fn isJustReleased(self: Input, key: KeyCode) bool {
-        return self.released[@intFromEnum(key)];
+    pub fn isJustReleased(self: Input, key: Key) bool {
+        return self.key_released[idx(key)];
     }
 
-    // Latest axis value in [-1, 1] (triggers [0, 1]).
-    pub fn axisValue(self: Input, axis: KeyCode) f32 {
-        return self.analog[@intFromEnum(axis)];
+    /// The OS repeated this held key on this frame (keyboard only).
+    pub fn isRepeated(self: Input, key: Key) bool {
+        return self.key_repeated[idx(key)];
     }
 
-    fn setKey(self: *Input, key: ?KeyCode, down: bool) void {
-        const k = key orelse return;
-        const i = @intFromEnum(k);
-        self.down[i] = down;
-        if (down) {
-            self.pressed[i] = true;
-        } else {
-            self.released[i] = true;
+    /// Raw axis in [-1, 1] (triggers [0, 1]).
+    pub fn axisValue(self: Input, axis: PadAxis) f32 {
+        return self.axes[idx(axis)];
+    }
+
+    /// Axis with the deadzone removed and the remainder rescaled to [-1, 1],
+    /// signed. This is what analog camera/movement should read.
+    pub fn axisStrength(self: Input, axis: PadAxis) f32 {
+        return deadzoned(self.axes[idx(axis)], self.deadzone);
+    }
+
+    // --- action queries (Godot's Input.is_action_*) ------------------------
+    // The action can be a string ("move_forward") or an enum / enum literal
+    // (.move_forward); the mapped name is the same either way.
+
+    pub fn isActionPressed(self: Input, action: anytype) bool {
+        for (self.find(actionName(action)).bindings) |b| {
+            if (self.bindingActive(b)) return true;
+        }
+        return false;
+    }
+
+    pub fn isActionJustPressed(self: Input, action: anytype) bool {
+        for (self.find(actionName(action)).bindings) |b| {
+            if (self.bindingJustPressed(b)) return true;
+        }
+        return false;
+    }
+
+    pub fn isActionJustReleased(self: Input, action: anytype) bool {
+        for (self.find(actionName(action)).bindings) |b| {
+            if (self.bindingJustReleased(b)) return true;
+        }
+        return false;
+    }
+
+    /// Keyboard auto-repeat on any binding. Pad buttons don't repeat.
+    pub fn isActionRepeated(self: Input, action: anytype) bool {
+        if (!self.devices.keyboard) return false;
+        for (self.find(actionName(action)).bindings) |b| switch (b) {
+            .key => |k| if (self.key_repeated[idx(k)]) return true,
+            else => {},
+        };
+        return false;
+    }
+
+    /// Analog pressure with digital bindings reading 1.0: max over bindings.
+    pub fn actionStrength(self: Input, action: anytype) f32 {
+        var strength: f32 = 0;
+        for (self.find(actionName(action)).bindings) |b| strength = @max(strength, self.bindingStrength(b));
+        return strength;
+    }
+
+    // --- internals ---------------------------------------------------------
+
+    fn find(self: Input, name: []const u8) Action {
+        for (self.actions) |a| {
+            if (std.mem.eql(u8, a.name, name)) return a;
+        }
+        std.debug.assert(false); // unmapped action name (typo?)
+        return .{ .name = name, .bindings = &.{} };
+    }
+
+    fn bindingActive(self: Input, b: Binding) bool {
+        return switch (b) {
+            .key => |k| self.devices.keyboard and self.key_down[idx(k)],
+            .pad_button => |btn| self.devices.pad and self.btn_down[idx(btn)],
+            .pad_axis => |a| self.devices.pad and self.axisDirActive(a),
+        };
+    }
+
+    fn bindingJustPressed(self: Input, b: Binding) bool {
+        return switch (b) {
+            .key => |k| self.devices.keyboard and self.key_pressed[idx(k)],
+            .pad_button => |btn| self.devices.pad and self.btn_pressed[idx(btn)],
+            .pad_axis => |a| self.devices.pad and self.axisDirActive(a) and !self.axisDirActivePrev(a),
+        };
+    }
+
+    fn bindingJustReleased(self: Input, b: Binding) bool {
+        return switch (b) {
+            .key => |k| self.devices.keyboard and self.key_released[idx(k)],
+            .pad_button => |btn| self.devices.pad and self.btn_released[idx(btn)],
+            .pad_axis => |a| self.devices.pad and !self.axisDirActive(a) and self.axisDirActivePrev(a),
+        };
+    }
+
+    fn bindingStrength(self: Input, b: Binding) f32 {
+        return switch (b) {
+            .key => |k| if (self.devices.keyboard and self.key_down[idx(k)]) 1 else 0,
+            .pad_button => |btn| if (self.devices.pad and self.btn_down[idx(btn)]) 1 else 0,
+            .pad_axis => |a| blk: {
+                if (!self.devices.pad) break :blk 0;
+                const signed = self.axisStrength(a.axis) * a.dir;
+                break :blk if (signed > 0) signed else 0;
+            },
+        };
+    }
+
+    fn axisDirActive(self: Input, a: anytype) bool {
+        return self.bindingAxisStrength(a) != 0;
+    }
+
+    fn axisDirActivePrev(self: Input, a: anytype) bool {
+        return self.bindingAxisStrengthPrev(a) != 0;
+    }
+
+    fn bindingAxisStrength(self: Input, a: anytype) f32 {
+        return self.axisStrength(a.axis) * a.dir;
+    }
+
+    fn bindingAxisStrengthPrev(self: Input, a: anytype) f32 {
+        return deadzoned(self.axes_prev[idx(a.axis)], self.deadzone) * a.dir;
+    }
+
+    const KeyEvent = enum { press, repeat, release };
+
+    fn setKey(self: *Input, key: Key, ev: KeyEvent) void {
+        const i = idx(key);
+        switch (ev) {
+            .press => if (!self.key_down[i]) {
+                self.key_down[i] = true;
+                self.key_pressed[i] = true;
+            },
+            .repeat => {
+                self.key_down[i] = true;
+                self.key_repeated[i] = true;
+            },
+            .release => if (self.key_down[i]) {
+                self.key_down[i] = false;
+                self.key_released[i] = true;
+            },
         }
     }
 
-    // The slot holds one pad; events from any other connected pad are dropped
-    // so a second controller can't drive the same game.
-    fn isActivePad(self: *Input, id: sdl.joystick.Id) bool {
-        const open = self.gamepad_id orelse return false;
-        return open.value == id.value;
+    fn setButton(self: *Input, button: PadButton, down: bool) void {
+        const i = idx(button);
+        if (self.btn_down[i] == down) return;
+        self.btn_down[i] = down;
+        if (down) self.btn_pressed[i] = true else self.btn_released[i] = true;
+    }
+
+    fn clearAll(self: *Input) void {
+        self.key_down = @splat(false);
+        self.key_pressed = @splat(false);
+        self.key_released = @splat(false);
+        self.key_repeated = @splat(false);
+        self.btn_down = @splat(false);
+        self.btn_pressed = @splat(false);
+        self.btn_released = @splat(false);
+        self.axes = @splat(0);
+        self.axes_prev = @splat(0);
+        self.mouse_dx = 0;
+        self.mouse_dy = 0;
     }
 
     fn openGamepad(self: *Input, id: sdl.joystick.Id) void {
@@ -141,61 +353,150 @@ pub const Input = struct {
         self.gamepad.?.deinit();
         self.gamepad = null;
         self.gamepad_id = null;
+        // No release events arrive after unplug; drop the pad's state so
+        // held buttons/axes don't drive the game forever.
+        self.btn_down = @splat(false);
+        self.axes = @splat(0);
+        self.axes_prev = @splat(0);
+    }
+
+    fn isActivePad(self: *Input, id: sdl.joystick.Id) bool {
+        const open = self.gamepad_id orelse return false;
+        return open.value == id.value;
     }
 };
 
-fn keyCode(scancode: ?sdl.Scancode) ?KeyCode {
-    return switch (scancode orelse return null) {
-        .w => .w,
-        .a => .a,
-        .s => .s,
-        .d => .d,
-        .f => .f,
-        .g => .g,
-        .space => .space,
-        .left_shift => .left_shift,
-        .escape => .escape,
-        else => null,
+fn deadzoned(v: f32, deadzone: f32) f32 {
+    const d = @min(deadzone, 0.9);
+    if (@abs(v) <= d) return 0;
+    return (v - std.math.sign(v) * d) / (1.0 - d);
+}
+
+/// Mapped name behind an action reference: string, enum, or enum literal.
+fn actionName(action: anytype) []const u8 {
+    const T = @TypeOf(action);
+    return switch (@typeInfo(T)) {
+        .enum_literal => @tagName(action),
+        .@"enum" => std.enums.tagName(T, action) orelse "?",
+        .pointer, .array => action,
+        else => @compileError("action must be a string, enum or enum literal, got " ++ @typeName(T)),
     };
 }
 
-fn axisCode(axis: sdl.gamepad.Axis) ?KeyCode {
-    return switch (axis) {
-        .left_x => .axis_left_x,
-        .left_y => .axis_left_y,
-        .right_x => .axis_right_x,
-        .right_y => .axis_right_y,
-        else => null,
-    };
+fn clampAxis(v: f32) f32 {
+    return std.math.clamp(v, -1.0, 1.0);
 }
 
-fn padButtonCode(button: sdl.gamepad.Button) ?KeyCode {
-    return switch (button) {
-        .south => .pad_south,
-        .east => .pad_east,
-        .west => .pad_west,
-        .north => .pad_north,
-        .dpad_up => .pad_dpad_up,
-        .dpad_down => .pad_dpad_down,
-        .dpad_left => .pad_dpad_left,
-        .dpad_right => .pad_dpad_right,
-        .left_shoulder => .pad_l1,
-        .right_shoulder => .pad_r1,
-        .start => .pad_start,
-        else => null,
-    };
+// --- tests -----------------------------------------------------------------
+
+fn press(in: *Input, key: Key) void {
+    in.setKey(key, .press);
+}
+
+fn release(in: *Input, key: Key) void {
+    in.setKey(key, .release);
 }
 
 test "edges latch until beginFrame" {
     var in: Input = .{};
     in.beginFrame();
-    in.setKey(.w, true);
-    try std.testing.expect(in.isDown(.w));
+    press(&in, .w);
+    try std.testing.expect(in.isPressed(.w));
     try std.testing.expect(in.isJustPressed(.w));
     in.beginFrame();
-    try std.testing.expect(in.isDown(.w));
+    try std.testing.expect(in.isPressed(.w));
     try std.testing.expect(!in.isJustPressed(.w));
-    in.setKey(.w, false);
-    try std.testing.expect(!in.isDown(.w));
+    release(&in, .w);
+    try std.testing.expect(!in.isPressed(.w));
     try std.testing.expect(in.isJustReleased(.w));
+}
+
+test "auto-repeat never re-fires justPressed" {
+    var in: Input = .{};
+    in.beginFrame();
+    press(&in, .g);
+    try std.testing.expect(in.isJustPressed(.g));
+    in.beginFrame();
+    in.setKey(.g, .repeat);
+    try std.testing.expect(in.isRepeated(.g));
+    try std.testing.expect(!in.isJustPressed(.g));
+    try std.testing.expect(in.isPressed(.g));
+}
+
+test "duplicate key_down is not a new edge" {
+    var in: Input = .{};
+    in.beginFrame();
+    press(&in, .w);
+    in.beginFrame();
+    press(&in, .w);
+    try std.testing.expect(!in.isJustPressed(.w));
+}
+
+test "focus loss clears held state" {
+    var in: Input = .{};
+    in.beginFrame();
+    press(&in, .w);
+    in.mouse_dx = 10;
+    in.axes[idx(PadAxis.left_x)] = 0.9;
+    in.clearAll();
+    try std.testing.expect(!in.isPressed(.w));
+    try std.testing.expectEqual(@as(f32, 0), in.axisValue(PadAxis.left_x));
+    try std.testing.expectEqual(@as(f32, 0), in.mouse_dx);
+}
+
+test "actions by name: keys, axes, device gates" {
+    const map = .{
+        .move_forward = &[_]Binding{
+            .{ .key = .w },
+            .{ .pad_axis = .{ .axis = .left_y, .dir = -1 } },
+        },
+    };
+
+    var in: Input = .{};
+    in.setMap(map);
+
+    // keyboard
+    in.beginFrame();
+    press(&in, .w);
+    try std.testing.expect(in.isActionPressed("move_forward")); // string form
+    try std.testing.expect(in.isActionJustPressed(.move_forward)); // enum literal
+    try std.testing.expectEqual(@as(f32, 1), in.actionStrength(.move_forward));
+
+    // typed enum value reads the same name
+    const Move = enum { move_forward };
+    try std.testing.expect(in.isActionPressed(Move.move_forward));
+
+    in.devices.keyboard = false;
+    try std.testing.expect(!in.isActionPressed("move_forward"));
+    in.devices.keyboard = true;
+
+    // drifted stick inside the deadzone must not trigger the action (release
+    // the key first: physical key state persists across frames)
+    in.beginFrame();
+    release(&in, .w);
+    in.axes[idx(PadAxis.left_y)] = -0.1;
+    try std.testing.expect(!in.isActionPressed("move_forward"));
+
+    // stick up: prev frame at rest, this frame pushed (negative = up)
+    in.beginFrame();
+    in.axes[idx(PadAxis.left_y)] = -1.0;
+    try std.testing.expect(in.isActionJustPressed("move_forward"));
+    try std.testing.expectApproxEqAbs(@as(f32, 1), in.actionStrength("move_forward"), 1e-6);
+
+    // next frame still held: pressed edge gone
+    in.beginFrame();
+    try std.testing.expect(in.isActionPressed("move_forward"));
+    try std.testing.expect(!in.isActionJustPressed("move_forward"));
+
+    // released back to center
+    in.beginFrame();
+    in.axes[idx(PadAxis.left_y)] = 0;
+    try std.testing.expect(in.isActionJustReleased("move_forward"));
+}
+
+test "deadzone rescales and zeroes the center" {
+    try std.testing.expectEqual(@as(f32, 0), deadzoned(0.1, 0.25));
+    try std.testing.expectEqual(@as(f32, 0), deadzoned(0.25, 0.25));
+    try std.testing.expectApproxEqAbs(@as(f32, 1), deadzoned(1.0, 0.25), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), deadzoned(-1.0, 0.25), 1e-6);
 }

@@ -21,7 +21,7 @@ pub const Buffer = struct {
     // Create a host-visible+coherent buffer and copy `data` into it.
     pub fn hostVisibleWith(ctx: *const Context, usage: vk.BufferUsageFlags, comptime T: type, data: []const T) !Buffer {
         const size: vk.DeviceSize = @sizeOf(T) * data.len;
-        const self = try create(ctx, size, usage, .{ .host_visible_bit = true, .host_coherent_bit = true });
+        const self = try create(ctx, size, usage, .{ .host_visible = true, .host_coherent = true });
         const mapped = try ctx.device.mapMemory(self.memory, 0, size, .{});
         @memcpy(@as([*]u8, @ptrCast(mapped))[0..size], std.mem.sliceAsBytes(data));
         ctx.device.unmapMemory(self.memory);
@@ -68,7 +68,7 @@ pub fn beginSingleTime(ctx: *const Context, pool: vk.CommandPool) !vk.CommandBuf
         .level = .primary,
         .command_buffer_count = 1,
     }, @ptrCast(&cmd));
-    try ctx.device.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
+    try ctx.device.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit = true } });
     return cmd;
 }
 
@@ -77,7 +77,7 @@ pub fn endSingleTime(ctx: *const Context, pool: vk.CommandPool, cmd: vk.CommandB
     try ctx.device.queueSubmit(ctx.graphics_queue, &.{.{
         .command_buffer_count = 1,
         .p_command_buffers = @ptrCast(&cmd),
-    }}, .null_handle);
+    }}, .null);
     try ctx.device.queueWaitIdle(ctx.graphics_queue);
     ctx.device.freeCommandBuffers(pool, &.{cmd});
 }

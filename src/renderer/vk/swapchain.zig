@@ -24,7 +24,7 @@ pub const Swapchain = struct {
     // call buildFramebuffers once Pipeline.init has run.
     pub fn init(ctx: *const Context, window: sdl.video.Window) !Swapchain {
         var self: Swapchain = undefined;
-        self.handle = .null_handle;
+        self.handle = .null;
         self.framebuffers = try ctx.allocator.alloc(vk.Framebuffer, 0);
         try self.create(ctx, window);
         try self.createImageViews(ctx);
@@ -63,7 +63,7 @@ pub const Swapchain = struct {
         // after the new one exists, if you ever drop the wait for faster resize.
         self.cleanup(ctx);
         ctx.device.destroySwapchainKHR(self.handle, null);
-        self.handle = .null_handle;
+        self.handle = .null;
 
         try self.create(ctx, window);
         try self.createImageViews(ctx);
@@ -91,16 +91,16 @@ pub const Swapchain = struct {
             .extent = .{ .width = self.extent.width, .height = self.extent.height, .depth = 1 },
             .mip_levels = 1,
             .array_layers = 1,
-            .samples = .{ .@"1_bit" = true },
+            .samples = .{ .@"1" = true },
             .tiling = .optimal,
-            .usage = .{ .depth_stencil_attachment_bit = true },
+            .usage = .{ .depth_stencil_attachment = true },
             .sharing_mode = .exclusive,
             .initial_layout = .undefined,
         }, null);
         const reqs = ctx.device.getImageMemoryRequirements(self.depth_image);
         self.depth_mem = try ctx.device.allocateMemory(&.{
             .allocation_size = reqs.size,
-            .memory_type_index = try buffer.findMemoryType(ctx, reqs.memory_type_bits, .{ .device_local_bit = true }),
+            .memory_type_index = try buffer.findMemoryType(ctx, reqs.memory_type_bits, .{ .device_local = true }),
         }, null);
         try ctx.device.bindImageMemory(self.depth_image, self.depth_mem, 0);
         self.depth_view = try ctx.device.createImageView(&.{
@@ -109,7 +109,7 @@ pub const Swapchain = struct {
             .format = depth_format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{
-                .aspect_mask = .{ .depth_bit = true },
+                .aspect_mask = .{ .depth = true },
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
@@ -144,12 +144,12 @@ pub const Swapchain = struct {
             .image_color_space = fmt.color_space,
             .image_extent = extent,
             .image_array_layers = 1,
-            .image_usage = .{ .color_attachment_bit = true },
+            .image_usage = .{ .color_attachment = true },
             .image_sharing_mode = if (gfx != prs) .concurrent else .exclusive,
             .queue_family_index_count = if (gfx != prs) 2 else 0,
             .p_queue_family_indices = if (gfx != prs) &qfi else null,
             .pre_transform = caps.current_transform,
-            .composite_alpha = .{ .opaque_bit_khr = true },
+            .composite_alpha = .{ .opaque_khr = true },
             .present_mode = pm,
             .clipped = .true,
             .old_swapchain = self.handle,
@@ -171,7 +171,7 @@ pub const Swapchain = struct {
                 .format = self.format,
                 .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
                 .subresource_range = .{
-                    .aspect_mask = .{ .color_bit = true },
+                    .aspect_mask = .{ .color = true },
                     .base_mip_level = 0,
                     .level_count = 1,
                     .base_array_layer = 0,

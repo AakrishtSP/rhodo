@@ -14,7 +14,7 @@ Install the following packages with pacman:
 sudo pacman -S zig vulkan-devel vulkan-validation-layers directx-shader-compiler
 ```
 
-- **zig** — compiler and build system (0.16.0+)
+- **zig** — compiler and build system (0.17.0+)
 - **vulkan-devel** — Vulkan headers and loader
 - **vulkan-validation-layers** — validation layers for debug builds
 - **directx-shader-compiler** — HLSL to SPIR-V shader compilation (games)

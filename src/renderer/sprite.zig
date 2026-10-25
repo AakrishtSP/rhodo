@@ -38,7 +38,7 @@ const sprite_attributes = [_]vk.VertexInputAttributeDescription{
     .{ .location = 1, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(SpriteVertex, "uv") },
 };
 const sprite_push = [_]vk.PushConstantRange{.{
-    .stage_flags = .{ .vertex_bit = true },
+    .stage_flags = .{ .vertex = true },
     .offset = 0,
     .size = @sizeOf(math.Mat4),
 }};
@@ -69,7 +69,7 @@ pub const Sprites = struct {
                     .binding = 0,
                     .descriptor_type = .combined_image_sampler,
                     .descriptor_count = 1,
-                    .stage_flags = .{ .fragment_bit = true },
+                    .stage_flags = .{ .fragment = true },
                 },
             },
         }, null);
@@ -94,9 +94,9 @@ pub const Sprites = struct {
             .blend = true,
         });
         errdefer self.pipeline.deinit(ctx);
-        self.quad_vb = try Buffer.hostVisibleWith(ctx, .{ .vertex_buffer_bit = true }, SpriteVertex, &quad_verts);
+        self.quad_vb = try Buffer.hostVisibleWith(ctx, .{ .vertex_buffer = true }, SpriteVertex, &quad_verts);
         errdefer self.quad_vb.deinit(ctx);
-        self.quad_ib = try Buffer.hostVisibleWith(ctx, .{ .index_buffer_bit = true }, u32, &quad_indices);
+        self.quad_ib = try Buffer.hostVisibleWith(ctx, .{ .index_buffer = true }, u32, &quad_indices);
         return self;
     }
 
@@ -132,7 +132,7 @@ pub const Sprites = struct {
         // Unused descriptor kinds still need a pointer; never dereferenced for
         // a combined image sampler write.
         const dummy_buf = std.mem.zeroes(vk.DescriptorBufferInfo);
-        const dummy_view: vk.BufferView = .null_handle;
+        const dummy_view: vk.BufferView = .null;
         ctx.device.updateDescriptorSets(&.{.{
             .dst_set = sets[0],
             .dst_binding = 0,
@@ -160,7 +160,7 @@ pub const Sprites = struct {
         const h: f32 = @floatFromInt(extent.height);
         const mvp = math.Mat4.orthographic(0, w, h, 0, -1, 1).mul(transform);
 
-        ctx.device.cmdPushConstants(cmd, self.pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &mvp);
+        ctx.device.cmdPushConstants(cmd, self.pipeline.layout, .{ .vertex = true }, 0, @sizeOf(math.Mat4), &mvp);
         ctx.device.cmdBindVertexBuffers(cmd, 0, &.{self.quad_vb.handle}, &.{0});
         ctx.device.cmdBindIndexBuffer(cmd, self.quad_ib.handle, 0, .uint32);
         ctx.device.cmdDrawIndexed(cmd, quad_indices.len, 1, 0, 0, 0);

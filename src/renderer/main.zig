@@ -8,6 +8,7 @@ const Pipeline = pipeline_mod.Pipeline;
 const Buffer = @import("vk/buffer.zig").Buffer;
 const mesh = @import("mesh.zig");
 const math = @import("../math.zig");
+const physics = @import("../physics.zig");
 const Camera = @import("../camera.zig").Camera;
 const DebugDraw = @import("debug.zig").DebugDraw;
 const imgui = @import("../imgui.zig").imgui;
@@ -16,15 +17,19 @@ const Sprites = @import("sprite.zig").Sprites;
 // Vulkan loader for ImGui's NO_PROTOTYPES backend. Resolves through our
 // instance proc addr (which also returns device functions).
 var ui_loader_proc: ?vk.PfnGetInstanceProcAddr = null;
-var ui_loader_instance: vk.Instance = .null_handle;
+var ui_loader_instance: vk.Instance = undefined;
 fn uiVkLoader(name: [*c]const u8, _: ?*anyopaque) callconv(.c) ?*const anyopaque {
     const p = ui_loader_proc orelse return null;
     return @ptrCast(p(ui_loader_instance, std.mem.span(name).ptr));
 }
 
-// Vk handles are enums; ImGui takes void*. Same bits, pointer-sized.
+// Vk handles are enums or opaque pointers; ImGui takes void*.
 fn vkToPtr(handle: anytype) ?*anyopaque {
-    return @ptrFromInt(@intFromEnum(handle));
+    return switch (@typeInfo(@TypeOf(handle))) {
+        .@"enum" => @ptrFromInt(@backingInt(handle)),
+        .pointer => @ptrCast(handle),
+        else => @compileError("vkToPtr expects a Vulkan handle"),
+    };
 }
 
 const max_frames_in_flight: u32 = 2;
@@ -43,7 +48,7 @@ const mesh_attributes = [_]vk.VertexInputAttributeDescription{
 const mesh_push = [_]vk.PushConstantRange{.{
     // 64B MVP + 16B tint + 16B light (dir xyz, ambient w). Vertex reads MVP,
     // fragment reads tint + light.
-    .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+    .stage_flags = .{ .vertex = true, .fragment = true },
     .offset = 0,
     .size = @sizeOf(math.Mat4) + @sizeOf(math.Vec4) * 2,
 }};
@@ -254,7 +259,7 @@ pub const Renderer = struct {
             self.swapchain.handle,
             std.math.maxInt(u64),
             acquire_semaphore,
-            .null_handle,
+            .null,
         ) catch |err| switch (err) {
             error.OutOfDateKHR => {
                 try self.recreateSwapchain();
@@ -310,7 +315,7 @@ pub const Renderer = struct {
 
         const image_index = self.current_image_index;
         const acquire_semaphore = self.image_available[f % self.image_available.len];
-        const wait_stage: vk.PipelineStageFlags = .{ .color_attachment_output_bit = true };
+        const wait_stage: vk.PipelineStageFlags = .{ .color_attachment_output = true };
         try self.ctx.device.queueSubmit(self.ctx.graphics_queue, &.{.{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = &.{acquire_semaphore},
@@ -481,12 +486,17 @@ pub const Renderer = struct {
 
         const handle: MeshHandle = self.mesh_count;
         self.meshes[handle] = .{
-            .vertex_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .vertex_buffer_bit = true }, mesh.Vertex, m.vertices),
-            .index_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .index_buffer_bit = true }, u32, m.indices),
+            .vertex_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .vertex_buffer = true }, mesh.Vertex, m.vertices),
+            .index_buffer = try Buffer.hostVisibleWith(&self.ctx, .{ .index_buffer = true }, u32, m.indices),
             .index_count = @intCast(m.indices.len),
         };
         self.mesh_count += 1;
         return handle;
+    }
+
+    /// Upload a mesh and pair it with a color — the one-call path for visuals.
+    pub fn uploadModel(self: *Renderer, m: mesh.Mesh, color: math.Vec4) !Model {
+        return .{ .mesh = try self.uploadMesh(m), .color = color };
     }
 
     // ponytail: immediate-mode, no draw list. Pipeline bound per-call.
@@ -500,7 +510,7 @@ pub const Renderer = struct {
 
         const mvp = self.viewProj().mul(transform);
 
-        self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex_bit = true }, 0, @sizeOf(math.Mat4), &mvp);
+        self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex = true }, 0, @sizeOf(math.Mat4), &mvp);
         self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});
         self.ctx.device.cmdBindIndexBuffer(cmd, entry.index_buffer.handle, 0, .uint32);
         self.ctx.device.cmdDrawIndexed(cmd, entry.index_count, 1, 0, 0, 0);
@@ -520,7 +530,7 @@ pub const Renderer = struct {
             .color = color,
             .light = .{ .x = self.light_dir.x, .y = self.light_dir.y, .z = self.light_dir.z, .w = self.light_ambient },
         };
-        self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(LitPush), &push);
+        self.ctx.device.cmdPushConstants(cmd, pipeline.layout, .{ .vertex = true, .fragment = true }, 0, @sizeOf(LitPush), &push);
         self.ctx.device.cmdBindVertexBuffers(cmd, 0, &.{entry.vertex_buffer.handle}, &.{0});
         self.ctx.device.cmdBindIndexBuffer(cmd, entry.index_buffer.handle, 0, .uint32);
         self.ctx.device.cmdDrawIndexed(cmd, entry.index_count, 1, 0, 0, 0);
@@ -528,6 +538,11 @@ pub const Renderer = struct {
 
     pub fn drawModel(self: *Renderer, model: Model, transform: math.Mat4) void {
         self.drawMeshTinted(model.mesh, model.color, transform);
+    }
+
+    /// Draw a body's mesh at its synced transform (position/rotation/scale).
+    pub fn drawBody(self: *Renderer, sim: *const physics.Physics, handle: physics.BodyHandle, model: Model) void {
+        self.drawModel(model, math.Mat4.fromTransform(sim.transform(handle)));
     }
 
     // Fire-and-forget debug lines in world space, flushed automatically at
@@ -542,6 +557,32 @@ pub const Renderer = struct {
 
     pub fn drawObb(self: *Renderer, pos: math.Vec3, rot: math.Vec4, half: math.Vec3, color: math.Vec3) void {
         self.debug.obb(pos, rot, half, color);
+    }
+
+    /// Character colliders are not bodies, so `drawColliders` can't see them.
+    pub fn drawCapsule(self: *Renderer, pos: math.Vec3, axis: math.Vec3, radius: f32, half_height: f32, color: math.Vec3) void {
+        self.debug.capsule(pos, axis, radius, half_height, color);
+    }
+
+    /// Debug: wireframe for every live collider, using the transforms from the
+    /// last `sim.sync()`. Colors come from `Physics.setColor` (defaults by body
+    /// type; triggers yellow). Colliders with no mesh show up only here.
+    pub fn drawColliders(self: *Renderer, sim: *const physics.Physics) void {
+        const up = math.Vec3{ .x = 0, .y = 1, .z = 0 };
+        for (0..sim.count) |i| {
+            const b = sim.bodies[i];
+            if (!b.alive) continue;
+            const t = physics.transforms[i];
+            const c = math.Vec3{ .x = b.color.x, .y = b.color.y, .z = b.color.z };
+            switch (b.kind) {
+                .box => self.debug.obb(t.pos, t.rot, t.scale, c),
+                .sphere => self.debug.sphere(t.pos, t.scale.x, c),
+                // bounds are (r, h+r, r) for capsules and (r, h, r) for cylinders
+                .capsule => self.debug.capsule(t.pos, up.rotateByQuat(t.rot), t.scale.x, t.scale.y - t.scale.x, c),
+                .cylinder => self.debug.cylinder(t.pos, up.rotateByQuat(t.rot), t.scale.x, t.scale.y, c),
+                .plane => self.debug.plane(t.pos, b.normal, 20, c),
+            }
+        }
     }
 
     // Upload an RGBA image as a sampled texture (delegates to Sprites).
@@ -565,7 +606,7 @@ pub const Renderer = struct {
 
     fn createCommandPool(self: *Renderer) !void {
         self.command_pool = try self.ctx.device.createCommandPool(&.{
-            .flags = .{ .reset_command_buffer_bit = true },
+            .flags = .{ .reset_command_buffer = true },
             .queue_family_index = self.ctx.queue_families.graphics,
         }, null);
     }
@@ -584,7 +625,7 @@ pub const Renderer = struct {
         self.render_finished = try self.allocator.alloc(vk.Semaphore, self.swapchain.images.len);
         for (self.render_finished) |*s| s.* = try self.ctx.device.createSemaphore(&.{}, null);
         for (0..max_frames_in_flight) |i| {
-            self.in_flight[i] = try self.ctx.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+            self.in_flight[i] = try self.ctx.device.createFence(&.{ .flags = .{ .signaled = true } }, null);
         }
     }
 };
