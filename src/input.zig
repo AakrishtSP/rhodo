@@ -4,13 +4,17 @@ const imgui = @import("imgui.zig").imgui;
 
 // Full input enums are re-exported from SDL instead of mirrored by hand: the
 // sets are large, sparse, and grow with SDL. This bends the "no sdl types in
-// the public API" rule for these three enums only — game code still never
+// the public API" rule for these four enums only — game code still never
 // imports sdl3 itself.
 pub const Key = sdl.Scancode;
+pub const MouseButton = sdl.mouse.Button;
 pub const PadButton = sdl.gamepad.Button;
 pub const PadAxis = sdl.gamepad.Axis;
 
 const key_count = maxTag(Key) + 1;
+// SDL reports a u8 button index and only names the five standard buttons.
+// Track the whole range so X1/X2 and extra vendor buttons never alias or panic.
+const mouse_count = 256;
 const button_count = maxTag(PadButton) + 1;
 const axis_count = maxTag(PadAxis) + 1;
 
@@ -34,6 +38,9 @@ pub const Event = union(enum) {
 /// One physical control that can drive an action.
 pub const Binding = union(enum) {
     key: Key,
+    /// Standard buttons are `.left`, `.middle`, `.right`, `.x1`, `.x2`;
+    /// `.x1`/`.x2` are the side buttons. Higher vendor indices also work.
+    mouse_button: MouseButton,
     pad_button: PadButton,
     /// Stick axis read as a digital direction: `dir` -1 (negative side, e.g.
     /// stick up) or 1 (positive side). Triggers only ever push positive.
@@ -46,9 +53,10 @@ const Action = struct {
     bindings: []const Binding,
 };
 
-/// Per-device gates applied to *action* queries only (raw key/axis queries
-/// always see everything). A game with a UI sets `.keyboard = captured` so keys
-/// don't drive the world while a text field or ImGui window has focus.
+/// Per-device gates applied to *action* queries only (raw key/axis/mouse
+/// queries always see everything). A game with a UI sets `.keyboard = captured`
+/// so keys and mouse buttons don't drive the world while a text field or ImGui
+/// window has focus; mouse capture is toggled with the same gate.
 pub const Devices = packed struct {
     keyboard: bool = true,
     pad: bool = true,
@@ -56,14 +64,18 @@ pub const Devices = packed struct {
 
 // Polled input state, owned by game code (`var input: rhodo.Input = .{}`).
 // beginFrame() clears edges + mouse delta, poll() drains SDL (feeding ImGui
-// first), manages the gamepad slot, and folds keys/buttons/axes into state.
-// Requires SDL initialized (Renderer.init does it).
+// first), manages the gamepad slot, and folds keys/mouse buttons/pad
+// buttons/axes into state. Requires SDL initialized (Renderer.init does it).
 pub const Input = struct {
     key_down: [key_count]bool = @splat(false),
     key_pressed: [key_count]bool = @splat(false),
     key_released: [key_count]bool = @splat(false),
     /// OS auto-repeat landed on this frame (held key "just pressed" again).
     key_repeated: [key_count]bool = @splat(false),
+
+    mouse_down: [mouse_count]bool = @splat(false),
+    mouse_pressed: [mouse_count]bool = @splat(false),
+    mouse_released: [mouse_count]bool = @splat(false),
 
     btn_down: [button_count]bool = @splat(false),
     btn_pressed: [button_count]bool = @splat(false),
@@ -119,6 +131,8 @@ pub const Input = struct {
         self.key_pressed = @splat(false);
         self.key_released = @splat(false);
         self.key_repeated = @splat(false);
+        self.mouse_pressed = @splat(false);
+        self.mouse_released = @splat(false);
         self.btn_pressed = @splat(false);
         self.btn_released = @splat(false);
         self.axes_prev = self.axes;
@@ -145,6 +159,8 @@ pub const Input = struct {
                     self.mouse_dx += m.x_rel;
                     self.mouse_dy += m.y_rel;
                 },
+                .mouse_button_down => |m| self.setMouseButton(m.button, true),
+                .mouse_button_up => |m| self.setMouseButton(m.button, false),
                 .gamepad_added => |dev| self.openGamepad(dev.id),
                 .gamepad_removed => |dev| self.closeGamepad(dev.id),
                 .gamepad_axis_motion => |a| {
@@ -178,6 +194,21 @@ pub const Input = struct {
     /// The OS repeated this held key on this frame (keyboard only).
     pub fn isRepeated(self: Input, key: Key) bool {
         return self.key_repeated[idx(key)];
+    }
+
+    /// Held down right now (raw; ignores `devices`). Includes `.x1`/`.x2`
+    /// side buttons and any higher vendor button index.
+    pub fn isMousePressed(self: Input, button: MouseButton) bool {
+        return self.mouse_down[idx(button)];
+    }
+
+    /// First frame of a mouse press. Mouse buttons do not auto-repeat.
+    pub fn isMouseJustPressed(self: Input, button: MouseButton) bool {
+        return self.mouse_pressed[idx(button)];
+    }
+
+    pub fn isMouseJustReleased(self: Input, button: MouseButton) bool {
+        return self.mouse_released[idx(button)];
     }
 
     /// Raw axis in [-1, 1] (triggers [0, 1]).
@@ -216,7 +247,7 @@ pub const Input = struct {
         return false;
     }
 
-    /// Keyboard auto-repeat on any binding. Pad buttons don't repeat.
+    /// Keyboard auto-repeat on any binding. Mouse and pad buttons don't repeat.
     pub fn isActionRepeated(self: Input, action: anytype) bool {
         if (!self.devices.keyboard) return false;
         for (self.find(actionName(action)).bindings) |b| switch (b) {
@@ -246,6 +277,7 @@ pub const Input = struct {
     fn bindingActive(self: Input, b: Binding) bool {
         return switch (b) {
             .key => |k| self.devices.keyboard and self.key_down[idx(k)],
+            .mouse_button => |btn| self.devices.keyboard and self.mouse_down[idx(btn)],
             .pad_button => |btn| self.devices.pad and self.btn_down[idx(btn)],
             .pad_axis => |a| self.devices.pad and self.axisDirActive(a),
         };
@@ -254,6 +286,7 @@ pub const Input = struct {
     fn bindingJustPressed(self: Input, b: Binding) bool {
         return switch (b) {
             .key => |k| self.devices.keyboard and self.key_pressed[idx(k)],
+            .mouse_button => |btn| self.devices.keyboard and self.mouse_pressed[idx(btn)],
             .pad_button => |btn| self.devices.pad and self.btn_pressed[idx(btn)],
             .pad_axis => |a| self.devices.pad and self.axisDirActive(a) and !self.axisDirActivePrev(a),
         };
@@ -262,6 +295,7 @@ pub const Input = struct {
     fn bindingJustReleased(self: Input, b: Binding) bool {
         return switch (b) {
             .key => |k| self.devices.keyboard and self.key_released[idx(k)],
+            .mouse_button => |btn| self.devices.keyboard and self.mouse_released[idx(btn)],
             .pad_button => |btn| self.devices.pad and self.btn_released[idx(btn)],
             .pad_axis => |a| self.devices.pad and !self.axisDirActive(a) and self.axisDirActivePrev(a),
         };
@@ -270,6 +304,7 @@ pub const Input = struct {
     fn bindingStrength(self: Input, b: Binding) f32 {
         return switch (b) {
             .key => |k| if (self.devices.keyboard and self.key_down[idx(k)]) 1 else 0,
+            .mouse_button => |btn| if (self.devices.keyboard and self.mouse_down[idx(btn)]) 1 else 0,
             .pad_button => |btn| if (self.devices.pad and self.btn_down[idx(btn)]) 1 else 0,
             .pad_axis => |a| blk: {
                 if (!self.devices.pad) break :blk 0;
@@ -322,11 +357,21 @@ pub const Input = struct {
         if (down) self.btn_pressed[i] = true else self.btn_released[i] = true;
     }
 
+    fn setMouseButton(self: *Input, button: MouseButton, down: bool) void {
+        const i = idx(button);
+        if (self.mouse_down[i] == down) return;
+        self.mouse_down[i] = down;
+        if (down) self.mouse_pressed[i] = true else self.mouse_released[i] = true;
+    }
+
     fn clearAll(self: *Input) void {
         self.key_down = @splat(false);
         self.key_pressed = @splat(false);
         self.key_released = @splat(false);
         self.key_repeated = @splat(false);
+        self.mouse_down = @splat(false);
+        self.mouse_pressed = @splat(false);
+        self.mouse_released = @splat(false);
         self.btn_down = @splat(false);
         self.btn_pressed = @splat(false);
         self.btn_released = @splat(false);
@@ -432,14 +477,88 @@ test "duplicate key_down is not a new edge" {
     try std.testing.expect(!in.isJustPressed(.w));
 }
 
+test "all standard mouse buttons are independent" {
+    const buttons = [_]MouseButton{ .left, .middle, .right, .x1, .x2 };
+    var in: Input = .{};
+    in.beginFrame();
+    for (buttons) |b| in.setMouseButton(b, true);
+    for (buttons) |b| {
+        try std.testing.expect(in.isMousePressed(b));
+        try std.testing.expect(in.isMouseJustPressed(b));
+    }
+
+    in.setMouseButton(.x1, false);
+    try std.testing.expect(!in.isMousePressed(.x1));
+    try std.testing.expect(in.isMouseJustReleased(.x1));
+    for ([_]MouseButton{ .left, .middle, .right, .x2 }) |b| {
+        try std.testing.expect(in.isMousePressed(b));
+    }
+}
+
+test "mouse buttons beyond the standard five are tracked" {
+    var in: Input = .{};
+    in.beginFrame();
+    const extra: MouseButton = @fromBackingInt(@intCast(200));
+    in.setMouseButton(extra, true);
+    try std.testing.expect(in.isMousePressed(extra));
+    try std.testing.expect(in.isMouseJustPressed(extra));
+
+    in.beginFrame();
+    try std.testing.expect(!in.isMouseJustPressed(extra));
+    in.setMouseButton(extra, false);
+    try std.testing.expect(in.isMouseJustReleased(extra));
+}
+
+test "duplicate mouse down is not a new edge" {
+    var in: Input = .{};
+    in.beginFrame();
+    in.setMouseButton(.left, true);
+    in.beginFrame();
+    in.setMouseButton(.left, true);
+    try std.testing.expect(!in.isMouseJustPressed(.left));
+}
+
+test "mouse actions by name, side buttons, and device gate" {
+    const map = .{
+        .attack = &[_]Binding{.{ .mouse_button = .left }},
+        .parry = &[_]Binding{.{ .mouse_button = .x1 }},
+    };
+
+    var in: Input = .{};
+    in.setMap(map);
+    in.beginFrame();
+    in.setMouseButton(.left, true);
+    try std.testing.expect(in.isActionPressed("attack"));
+    try std.testing.expect(in.isActionJustPressed(.attack));
+    try std.testing.expectEqual(@as(f32, 1), in.actionStrength(.attack));
+
+    in.devices.keyboard = false;
+    try std.testing.expect(!in.isActionPressed("attack"));
+    in.devices.keyboard = true;
+
+    in.beginFrame();
+    try std.testing.expect(in.isActionPressed("attack"));
+    try std.testing.expect(!in.isActionJustPressed("attack"));
+
+    in.setMouseButton(.x1, true);
+    try std.testing.expect(in.isActionJustPressed(.parry));
+    try std.testing.expect(in.isActionPressed("parry"));
+
+    in.setMouseButton(.left, false);
+    try std.testing.expect(in.isActionJustReleased("attack"));
+    try std.testing.expect(!in.isActionPressed("attack"));
+}
+
 test "focus loss clears held state" {
     var in: Input = .{};
     in.beginFrame();
     press(&in, .w);
+    in.setMouseButton(.right, true);
     in.mouse_dx = 10;
     in.axes[idx(PadAxis.left_x)] = 0.9;
     in.clearAll();
     try std.testing.expect(!in.isPressed(.w));
+    try std.testing.expect(!in.isMousePressed(.right));
     try std.testing.expectEqual(@as(f32, 0), in.axisValue(PadAxis.left_x));
     try std.testing.expectEqual(@as(f32, 0), in.mouse_dx);
 }

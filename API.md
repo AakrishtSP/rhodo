@@ -215,14 +215,17 @@ manages the gamepad slot). Requires SDL initialized (`Renderer.init`).
   `quit`/`resized` only; keys/buttons/axes fold into state (not returned).
 - Raw queries: `isPressed`, `isJustPressed` (first frame only — OS auto-repeat
   never re-fires it), `isJustReleased`, `isRepeated` (auto-repeat frames while
-  held), `axisValue` (raw −1..1, triggers 0..1), `axisStrength` (deadzoned,
-  rescaled, signed), `mouse_dx/dy` (relative pixels). `deinit` closes the pad.
-- `Key` / `PadButton` / `PadAxis` — the full SDL sets re-exported, so every key,
-  pad button and axis is available with no per-key engine work. Pad names are
-  positional (`pad_south` = PS cross / Xbox A). One pad slot (first wins,
-  hot-plug); unplug clears its state.
-- Focus loss clears all held keys/buttons/axes — no stuck movement after
-  alt-tab (SDL never delivers the matching releases).
+  held), `isMousePressed`, `isMouseJustPressed`, `isMouseJustReleased`,
+  `axisValue` (raw −1..1, triggers 0..1), `axisStrength` (deadzoned, rescaled,
+  signed), `mouse_dx/dy` (relative pixels). `deinit` closes the pad.
+- `Key` / `MouseButton` / `PadButton` / `PadAxis` — the full SDL sets
+  re-exported, so every key, mouse button, pad button and axis is available with
+  no per-device engine work. Mouse buttons include `.left`, `.middle`, `.right`
+  and the side buttons `.x1`/`.x2`; higher vendor button indices are tracked too.
+  Pad names are positional (`pad_south` = PS cross / Xbox A). One pad slot (first
+  wins, hot-plug); unplug clears its state.
+- Focus loss clears all held keys/mouse buttons/pad buttons/axes — no stuck
+  movement after alt-tab (SDL never delivers the matching releases).
 
 ### Actions (`setMap`, Godot-style InputMap)
 
@@ -234,6 +237,10 @@ const actions = .{
         .{ .key = .w },
         .{ .pad_button = .dpad_up },
         .{ .pad_axis = .{ .axis = .left_y, .dir = -1 } }, // stick read as a direction
+    },
+    .attack = &[_]rhodo.Binding{
+        .{ .mouse_button = .left },
+        .{ .pad_button = .south },
     },
 };
 input.setMap(actions);   // comptime table: field names are the action names
@@ -248,11 +255,14 @@ time — no strings and no runtime table to own. `.move_forward` in the map and
   magnitude after the deadzone). Take the action as a string or an enum /
   enum literal — `.move_forward` and `"move_forward"` are the same lookup, so
   call sites read like Godot's `is_action_pressed` without a constant table.
-- `Binding` = `.key`, `.pad_button`, or `.pad_axis{ axis, dir }` (`dir` -1 for
-  up/left, 1 for down/right). `input.deadzone` is the tuning knob (default 0.25).
+- `Binding` = `.key`, `.mouse_button`, `.pad_button`, or `.pad_axis{ axis, dir }`
+  (`dir` -1 for up/left, 1 for down/right). `.mouse_button` accepts the standard
+  buttons and side buttons (`.x1`/`.x2`). `input.deadzone` is the tuning knob
+  (default 0.25).
 - `input.devices.keyboard` / `.pad` gate *action* queries only: set
-  `.keyboard = captured and !ui_busy` so keys don't drive the world behind a UI,
-  while the pad (never a UI pointer) keeps working. Raw queries ignore these.
+  `.keyboard = captured and !ui_busy` so keys and mouse buttons don't drive the
+  world behind a UI, while the pad (never a UI pointer) keeps working. Raw
+  queries ignore these.
 - Unmapped action names assert in debug builds (typo guard).
 - `Renderer.setMouseCapture(bool)` — relative mode for mouse-look (window
   property, stays on renderer).

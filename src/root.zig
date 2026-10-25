@@ -5,6 +5,7 @@ pub const ShaderHandle = @import("renderer/main.zig").ShaderHandle;
 pub const TextureHandle = @import("renderer/main.zig").TextureHandle;
 pub const Model = @import("renderer/main.zig").Model;
 pub const Key = @import("input.zig").Key;
+pub const MouseButton = @import("input.zig").MouseButton;
 pub const PadButton = @import("input.zig").PadButton;
 pub const PadAxis = @import("input.zig").PadAxis;
 pub const Binding = @import("input.zig").Binding;
