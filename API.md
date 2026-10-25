@@ -137,12 +137,12 @@ World space. No-op when empty.
   `(a.layers & b.mask) != 0 and (b.layers & a.mask) != 0`. Defaults are layer
   bit 0 and all masks (`rhodo.default_layers`, `rhodo.all_layers`). Queries use
   `layers` only, so `mask` never hides a body from a ray.
-- `raycast(origin, dir, max_distance, layers) ?Physics.RayHit` — closest body
+- `raycast(origin, dir, max_distance, layers) ?rhodo.RayHit` — closest body
   hit. `RayHit = { body, point, normal, distance }`; `dir` need not be
   normalized. `layers` selects bodies by their `layers` bits, **not** their
   collision mask. Aim with your glass bit; for the laser start at the inner
   cell face plus epsilon so it doesn't hit its own pane. `layers = 0` misses.
-- `raycastCharacters(origin, dir, max_distance, layers) ?Physics.CharacterHit` —
+- `raycastCharacters(origin, dir, max_distance, layers) ?rhodo.CharacterHit` —
   ray/capsule test against `CharacterVirtual`s (they are not in Jolt's
   broadphase). Same layer semantics; `CharacterHit = { character, point,
   normal, distance }`. Pick the nearer of a body hit and a character hit for
