@@ -1,7 +1,17 @@
 const std = @import("std");
 
 pub const Vec2 = struct { x: f32, y: f32 };
-pub const Vec4 = struct { x: f32, y: f32, z: f32, w: f32 };
+pub const Vec4 = struct {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+
+    /// Inverse of a unit rotation quaternion.
+    pub fn conjugate(q: Vec4) Vec4 {
+        return .{ .x = -q.x, .y = -q.y, .z = -q.z, .w = q.w };
+    }
+};
 
 // Rigid transform: world position, unit quaternion (x, y, z, w), scale.
 // Physics writes these; Mat4.fromTransform composes them for rendering.
@@ -31,6 +41,16 @@ pub const Transform = struct {
     /// Local direction -> world (rotation only; ignores position and scale).
     pub fn direction(self: Transform, local: Vec3) Vec3 {
         return local.rotateByQuat(self.rot);
+    }
+
+    /// World point -> local (inverse of `offset`).
+    pub fn inverseOffset(self: Transform, world: Vec3) Vec3 {
+        return world.sub(self.pos).rotateByQuat(self.rot.conjugate());
+    }
+
+    /// World direction -> local (inverse of `direction`).
+    pub fn inverseDirection(self: Transform, world: Vec3) Vec3 {
+        return world.rotateByQuat(self.rot.conjugate());
     }
 };
 
@@ -346,6 +366,15 @@ test "Transform maps local points and directions" {
     const d = t.direction(.{ .x = 1, .y = 0, .z = 0 });
     try std.testing.expectApproxEqAbs(@as(f32, 0), d.x, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, -1), d.z, 1e-5);
+
+    // world -> local round-trips (offset/direction ignore scale)
+    const local = t.inverseOffset(off);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), local.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), local.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), local.z, 1e-5);
+    const local_dir = t.inverseDirection(d);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), local_dir.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), local_dir.z, 1e-5);
 }
 
 test "rotateByQuat turns +X to -Z on 90deg Y" {

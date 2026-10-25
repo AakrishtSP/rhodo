@@ -64,7 +64,8 @@ inside the render pass (before `endFrame`); debug lines flush automatically at
   One directional only; point lights + fog arrive with atmosphere work.
 - `Camera` (`src/camera.zig`) — `pos`, `yaw`/`pitch` (radians), `pitch_min`/
   `pitch_max` (clamped by `addLook`), `fov_y`, `near=0.1`, `far=100`.
-  `forward()`, `right()`, `view()`, `projection(aspect)`,
+  `forward()`, `forwardFlat()` (yaw only, for camera-relative movement),
+  `right()`, `up()`, `view()`, `projection(aspect)`,
   `addLook(input, dt, .{})` (mouse while the keyboard device is live + right
   stick), `orbit(target, distance)` (places the camera behind its look
   direction, aimed at target), `orbitOffset(target, distance, right, up)`
@@ -284,10 +285,11 @@ before reaching the driver (`error.InvalidSpirv`).
 column-major (`identity/mul/transpose/perspective/lookAt/rotationY/
 orthographic/translate/scale/fromTransform/orientedBoxAabb`). `Transform` also
 has `offset(local)` (position + rotation, ignores scale), `point(local)` (full
-T*R*S) and `direction(local)` (rotation only) for local-to-world conversion.
-Use `offset` for hitbox/muzzle/weak-spot offsets from `Physics.transform`,
-whose scale is shape bounds rather than an entity scale — keep offsets local
-to the entity and convert at the boundary.
+T*R*S), `direction(local)` (rotation only), plus `inverseOffset(world)` and
+`inverseDirection(world)` for the trip back. Use `offset` for
+hitbox/muzzle/weak-spot offsets from `Physics.transform`, whose scale is shape
+bounds rather than an entity scale — keep offsets local to the entity and
+convert at the boundary.
 
 ## Mesh loading (`src/renderer/mesh.zig`)
 

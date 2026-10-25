@@ -27,9 +27,19 @@ pub const Camera = struct {
         };
     }
 
+    /// Ground-plane forward (yaw only), for camera-relative WASD.
+    pub fn forwardFlat(self: Camera) math.Vec3 {
+        return .{ .x = @sin(self.yaw), .y = 0, .z = -@cos(self.yaw) };
+    }
+
     /// World-space right (yaw only, so shoulder offsets do not tilt with pitch).
     pub fn right(self: Camera) math.Vec3 {
         return .{ .x = @cos(self.yaw), .y = 0, .z = @sin(self.yaw) };
+    }
+
+    /// Camera-local up (tilted with pitch).
+    pub fn up(self: Camera) math.Vec3 {
+        return self.right().cross(self.forward()).normalize();
     }
 
     /// Sensitivities for `addLook`: mouse radians/pixel, stick radians/second.
@@ -100,6 +110,20 @@ test "orbit keeps the target in front at the requested distance" {
     const d = target.sub(cam.pos);
     try std.testing.expectApproxEqAbs(@as(f32, 5), @sqrt(d.dot(d)), 1e-5);
     try std.testing.expectApproxEqAbs(cam.forward().x, d.normalize().x, 1e-5);
+}
+
+test "camera basis: flat forward, right, and pitched up" {
+    const level: Camera = .{ .yaw = std.math.pi / 2.0 };
+    try std.testing.expectApproxEqAbs(@as(f32, 1), level.forwardFlat().x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), level.forwardFlat().y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), level.right().x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), level.right().z, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), level.up().y, 1e-5);
+
+    const tilted: Camera = .{ .pitch = 0.4 };
+    const u = tilted.up();
+    try std.testing.expectApproxEqAbs(@cos(@as(f32, 0.4)), u.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@sin(@as(f32, 0.4)), u.z, 1e-5);
 }
 
 test "orbitOffset adds shoulder and height without changing aim" {
