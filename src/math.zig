@@ -1,10 +1,38 @@
 const std = @import("std");
 
+pub const Vec2 = struct { x: f32, y: f32 };
 pub const Vec4 = struct { x: f32, y: f32, z: f32, w: f32 };
 
 // Rigid transform: world position, unit quaternion (x, y, z, w), scale.
 // Physics writes these; Mat4.fromTransform composes them for rendering.
-pub const Transform = struct { pos: Vec3, rot: Vec4, scale: Vec3 };
+pub const Transform = struct {
+    pos: Vec3,
+    rot: Vec4,
+    scale: Vec3,
+
+    /// Full local point -> world (T*R*S). Only use when `scale` is a real
+    /// entity scale; physics transforms store shape bounds there. For hitbox /
+    /// muzzle / weak-spot offsets from a physics transform, use `offset`.
+    pub fn point(self: Transform, local: Vec3) Vec3 {
+        const scaled = Vec3{
+            .x = local.x * self.scale.x,
+            .y = local.y * self.scale.y,
+            .z = local.z * self.scale.z,
+        };
+        return self.pos.add(scaled.rotateByQuat(self.rot));
+    }
+
+    /// Local point -> world using position + rotation only (ignores scale).
+    /// This is the one for entity-local offsets from `Physics.transform`.
+    pub fn offset(self: Transform, local: Vec3) Vec3 {
+        return self.pos.add(local.rotateByQuat(self.rot));
+    }
+
+    /// Local direction -> world (rotation only; ignores position and scale).
+    pub fn direction(self: Transform, local: Vec3) Vec3 {
+        return local.rotateByQuat(self.rot);
+    }
+};
 
 pub const Vec3 = struct {
     x: f32,
@@ -175,6 +203,23 @@ pub const Mat4 = struct {
         return .{ .min = pos.sub(wh), .max = pos.add(wh) };
     }
 
+    /// Clip-space transform -> top-left pixel coordinates (Vulkan viewport:
+    /// NDC y=-1 is the top). Null behind the camera or outside depth 0..1.
+    pub fn projectPoint(vp: Mat4, p: Vec3, width: f32, height: f32) ?Vec2 {
+        const m = vp.m;
+        const x = m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12];
+        const y = m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13];
+        const z = m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14];
+        const w = m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15];
+        if (w <= 0) return null;
+        const ndc_z = z / w;
+        if (ndc_z < 0 or ndc_z > 1) return null;
+        return .{
+            .x = (x / w + 1.0) * 0.5 * width,
+            .y = (y / w + 1.0) * 0.5 * height,
+        };
+    }
+
     // Compose translation * rotation * scale from a Transform. rot is a unit
     // quaternion (x, y, z, w); columns are scaled so M = T*R*S.
     pub fn fromTransform(t: Transform) Mat4 {
@@ -264,6 +309,43 @@ test "orientedBoxAabb is tight when rotated" {
     try std.testing.expectApproxEqAbs(@as(f32, 3), b.max.x, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 2), b.max.y, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1), b.max.z, 1e-5);
+}
+
+test "projectPoint maps center and rejects behind-camera points" {
+    const center = Mat4.projectPoint(Mat4.identity, .{ .x = 0, .y = 0, .z = 0.5 }, 800, 600);
+    try std.testing.expect(center != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), center.?.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 300), center.?.y, 1e-5);
+
+    const proj = Mat4.perspective(std.math.pi / 2.0, 1, 0.1, 100);
+    try std.testing.expect(Mat4.projectPoint(proj, .{ .x = 0, .y = 0, .z = 1 }, 800, 600) == null);
+    const front = Mat4.projectPoint(proj, .{ .x = 0, .y = 0, .z = -1 }, 800, 600);
+    try std.testing.expect(front != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), front.?.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 300), front.?.y, 1e-5);
+}
+
+test "Transform maps local points and directions" {
+    const h = @sqrt(@as(f32, 0.5));
+    const t = Transform{
+        .pos = .{ .x = 10, .y = 0, .z = 0 },
+        .rot = .{ .x = 0, .y = h, .z = 0, .w = h }, // 90deg about Y
+        .scale = .{ .x = 2, .y = 3, .z = 4 },
+    };
+    // local +X scales to 2, rotates to -Z, then translates
+    const p = t.point(.{ .x = 1, .y = 0, .z = 0 });
+    try std.testing.expectApproxEqAbs(@as(f32, 10), p.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), p.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -2), p.z, 1e-5);
+
+    // offset ignores scale (physics transforms store shape bounds in scale)
+    const off = t.offset(.{ .x = 1, .y = 0, .z = 0 });
+    try std.testing.expectApproxEqAbs(@as(f32, 10), off.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), off.z, 1e-5);
+
+    const d = t.direction(.{ .x = 1, .y = 0, .z = 0 });
+    try std.testing.expectApproxEqAbs(@as(f32, 0), d.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), d.z, 1e-5);
 }
 
 test "rotateByQuat turns +X to -Z on 90deg Y" {

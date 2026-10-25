@@ -37,6 +37,11 @@ void Imgui_Separator(void);
 void Imgui_SetNextWindowPos(float x, float y);
 void Imgui_SetNextWindowSize(float w, float h);
 
+// Foreground draw list (screen pixels, drawn over the UI):
+// color is IM_COL32: 0xAABBGGRR (low byte = red).
+void Imgui_TextAt(float x, float y, uint32_t color, const char *text);
+void Imgui_Line2D(float x0, float y0, float x1, float y1, uint32_t color, float thickness);
+
 // IO state.
 bool Imgui_WantCaptureMouse(void);
 bool Imgui_WantCaptureKeyboard(void);

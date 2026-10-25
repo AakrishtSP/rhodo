@@ -23,6 +23,11 @@ void Jolt_Shutdown(void);
 
 // Add an axis-aligned box. Returns the Jolt body id, or 0xFFFFFFFF on failure.
 uint32_t Jolt_AddBox(const float pos[3], const float half_extent[3], int body_type);
+// Collision/query layers: `layers` is the set of layers this body belongs to,
+// `mask` is the set of layers it collides with. Bodies collide only when both
+// agree: (a.layers & b.mask) && (b.layers & a.mask). Queries select bodies by
+// `layers`, independent of `mask`. Defaults: layer bit 0, all masks.
+void Jolt_SetBodyLayers(uint32_t id, uint32_t layers, uint32_t mask);
 // Other shapes. Capsules/cylinders are upright (Y), capsule/cylinder
 // `half_height` is the half height of the straight part (radius excluded).
 uint32_t Jolt_AddSphere(const float pos[3], float radius, int body_type);
@@ -33,9 +38,19 @@ uint32_t Jolt_AddPlane(const float pos[3], const float normal[3], int body_type)
 void Jolt_RemoveBody(uint32_t id);
 // Sensor = pass-through collider: no contact response, still found by queries.
 void Jolt_SetSensor(uint32_t id, bool is_sensor);
-// Bodies whose shape intersects body `id` (self excluded). Writes up to
-// max_count Jolt ids, returns the count. Backs `Physics.overlaps` for triggers.
-int Jolt_Overlaps(uint32_t id, uint32_t *out_ids, int max_count);
+// Bodies whose shape intersects body `id` (self excluded) and whose layers
+// match `layers`. Writes up to max_count Jolt ids, returns the count.
+int Jolt_Overlaps(uint32_t id, uint32_t *out_ids, int max_count, uint32_t layers);
+// Closest body hit along `dir` (normalized by the caller) up to max_distance.
+// `layers` selects bodies by their layer bits. Returns false on a miss.
+typedef struct {
+    uint32_t body_id;
+    float point[3];
+    float normal[3];
+    float distance;
+} JoltRayHit;
+bool Jolt_Raycast(const float origin[3], const float dir[3], float max_distance,
+                  uint32_t layers, JoltRayHit *out);
 // For kinematic and dynamic bodies (kinematic platforms need this; static ignores).
 void Jolt_SetBodyVelocity(uint32_t id, const float vel[3]);
 void Jolt_Step(float dt);
@@ -47,8 +62,13 @@ void Jolt_GetTransform(uint32_t id, float out_pos[3], float out_quat[4]);
 // not simulated: fold it into `velocity` before calling. Returns 0xFFFFFFFF on
 // failure. Max slope 50deg, step up 0.4, stick-to-floor 0.5 (Jolt defaults).
 uint32_t Jolt_AddCharacter(const float feet_pos[3], float radius, float half_height);
+// `layers`/`mask` use the same body-layer semantics: a body must match both
+// the character's mask and its own mask must include the character's layers.
 void Jolt_CharacterMove(uint32_t id, const float velocity[3], float dt,
+                        uint32_t layers, uint32_t mask,
                         float out_feet_pos[3], bool *out_grounded);
+// Bodies whose shape intersects this character's capsule, filtered by layers.
+int Jolt_CharacterOverlaps(uint32_t id, uint32_t *out_ids, int max_count, uint32_t layers);
 void Jolt_RemoveCharacter(uint32_t id);
 
 #ifdef __cplusplus

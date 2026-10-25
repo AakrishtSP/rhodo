@@ -5,6 +5,11 @@ const jolt = @import("jolt");
 pub const BodyHandle = u32;
 pub const CharacterHandle = u32;
 
+/// All layer bits. Pass to a query when you want every layer.
+pub const all_layers: u32 = 0xFFFF_FFFF;
+/// Default layer for bodies/characters until `setLayers` says otherwise.
+pub const default_layers: u32 = 1 << 0;
+
 /// How a body moves.
 pub const BodyType = enum(u8) {
     /// Never moves: floor, walls. Can't be pushed.
@@ -44,6 +49,10 @@ pub const Body = struct {
     normal: math.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
     /// Gizmo color; override with `setColor`.
     color: math.Vec4 = collider_colors.static,
+    /// Layer membership bits (queries select by these).
+    layers: u32 = default_layers,
+    /// Collision mask: layer bits this body collides with.
+    mask: u32 = all_layers,
     alive: bool = false,
 };
 
@@ -51,6 +60,22 @@ pub const Body = struct {
 pub const Character = struct {
     pos: math.Vec3,
     grounded: bool,
+};
+
+/// A body hit from `Physics.raycast`.
+pub const RayHit = struct {
+    body: BodyHandle,
+    point: math.Vec3,
+    normal: math.Vec3,
+    distance: f32,
+};
+
+/// A character hit from `Physics.raycastCharacters`.
+pub const CharacterHit = struct {
+    character: CharacterHandle,
+    point: math.Vec3,
+    normal: math.Vec3,
+    distance: f32,
 };
 
 // Minimal Jolt wrapper: init/shutdown once, box/sphere/capsule/cylinder/plane
@@ -69,6 +94,11 @@ pub const Physics = struct {
     char_ids: [max_characters]u32 = undefined,
     /// half_height + radius: feet (Jolt's position) -> capsule center.
     char_offsets: [max_characters]f32 = undefined,
+    char_pos: [max_characters]math.Vec3 = @splat(.{ .x = 0, .y = 0, .z = 0 }),
+    char_radius: [max_characters]f32 = @splat(0),
+    char_half_height: [max_characters]f32 = @splat(0),
+    char_layers: [max_characters]u32 = @splat(default_layers),
+    char_mask: [max_characters]u32 = @splat(all_layers),
     char_alive: [max_characters]bool = @splat(false),
     char_count: u32 = 0,
 
@@ -146,26 +176,130 @@ pub const Physics = struct {
         self.bodies[handle].color = color;
     }
 
+    /// Layer membership + collision mask. Bodies collide only when both agree:
+    /// `(a.layers & b.mask) != 0 and (b.layers & a.mask) != 0`. Queries use
+    /// `layers` only, so raising/lowering `mask` never hides a body from a ray.
+    pub fn setLayers(self: *Physics, handle: BodyHandle, layers: u32, mask: u32) void {
+        if (!self.bodies[handle].alive) return;
+        self.bodies[handle].layers = layers;
+        self.bodies[handle].mask = mask;
+        jolt.Jolt_SetBodyLayers(self.bodies[handle].id, layers, mask);
+    }
+
     /// Bodies whose shape intersects `handle` (self excluded), written into
     /// `out`. Solid bodies show up too — filter by vocabulary (the game knows
     /// which handles are players/enemies/props).
     pub fn overlaps(self: *Physics, handle: BodyHandle, out: []BodyHandle) []BodyHandle {
-        if (!self.bodies[handle].alive) return out[0..0];
+        return self.overlapsMasked(handle, out, all_layers);
+    }
+
+    /// `overlaps` limited to bodies whose layer bits match `layers`.
+    pub fn overlapsMasked(self: *Physics, handle: BodyHandle, out: []BodyHandle, layers: u32) []BodyHandle {
+        if (!self.bodies[handle].alive or layers == 0) return out[0..0];
         var ids: [64]u32 = undefined;
         const max: c_int = @intCast(@min(out.len, ids.len));
-        const n: usize = @intCast(jolt.Jolt_Overlaps(self.bodies[handle].id, &ids, max));
+        const n: usize = @intCast(jolt.Jolt_Overlaps(self.bodies[handle].id, &ids, max, layers));
         var count: usize = 0;
         for (ids[0..n]) |id| {
-            // ponytail: linear id->handle scan; a map if you have 1000s of bodies.
-            for (0..self.count) |i| {
-                if (self.bodies[i].alive and self.bodies[i].id == id) {
-                    out[count] = @intCast(i);
-                    count += 1;
-                    break;
-                }
+            if (self.handleOf(id)) |h| {
+                out[count] = h;
+                count += 1;
             }
         }
         return out[0..count];
+    }
+
+    /// Closest body hit along `dir` (normalized internally) up to `max_distance`.
+    /// `layers` selects bodies by their `layers` bits: aim with `layers = glass`
+    /// so dummies/props do not block it; the laser can pass `enemy | barrier`.
+    pub fn raycast(
+        self: *const Physics,
+        origin: math.Vec3,
+        dir: math.Vec3,
+        max_distance: f32,
+        layers: u32,
+    ) ?RayHit {
+        if (layers == 0 or max_distance <= 0) return null;
+        const d = dir.normalize();
+        if (d.dot(d) == 0) return null;
+        var hit: jolt.JoltRayHit = undefined;
+        const o = vec3f(origin);
+        const dv = vec3f(d);
+        if (!jolt.Jolt_Raycast(&o, &dv, max_distance, layers, &hit)) return null;
+        const h = self.handleOf(hit.body_id) orelse return null;
+        return .{
+            .body = h,
+            .point = .{ .x = hit.point[0], .y = hit.point[1], .z = hit.point[2] },
+            .normal = .{ .x = hit.normal[0], .y = hit.normal[1], .z = hit.normal[2] },
+            .distance = hit.distance,
+        };
+    }
+
+    /// Closest character capsule hit. Characters are not Jolt bodies, so this
+    /// is a manual ray/capsule test — same `layers` semantics as `raycast`.
+    pub fn raycastCharacters(
+        self: *const Physics,
+        origin: math.Vec3,
+        dir: math.Vec3,
+        max_distance: f32,
+        layers: u32,
+    ) ?CharacterHit {
+        if (layers == 0 or max_distance <= 0) return null;
+        const d = dir.normalize();
+        if (d.dot(d) == 0) return null;
+
+        var best: ?CharacterHit = null;
+        for (0..self.char_count) |i| {
+            if (!self.char_alive[i] or (self.char_layers[i] & layers) == 0) continue;
+            const hit = rayCapsule(
+                origin,
+                d,
+                max_distance,
+                self.char_pos[i],
+                self.char_radius[i],
+                self.char_half_height[i],
+            ) orelse continue;
+            if (best == null or hit.t < best.?.distance) {
+                best = .{
+                    .character = @intCast(i),
+                    .point = origin.add(d.scale(hit.t)),
+                    .normal = hit.normal,
+                    .distance = hit.t,
+                };
+            }
+        }
+        return best;
+    }
+
+    /// Bodies intersecting this character's capsule, written into `out`.
+    /// `overlaps` only sees rigid bodies; this is the character-aware version
+    /// for hurtboxes and trigger volumes.
+    pub fn characterOverlaps(
+        self: *const Physics,
+        handle: CharacterHandle,
+        out: []BodyHandle,
+        layers: u32,
+    ) []BodyHandle {
+        if (!self.char_alive[handle] or layers == 0) return out[0..0];
+        var ids: [64]u32 = undefined;
+        const max: c_int = @intCast(@min(out.len, ids.len));
+        const n: usize = @intCast(jolt.Jolt_CharacterOverlaps(self.char_ids[handle], &ids, max, layers));
+        var count: usize = 0;
+        for (ids[0..n]) |id| {
+            if (self.handleOf(id)) |h| {
+                out[count] = h;
+                count += 1;
+            }
+        }
+        return out[0..count];
+    }
+
+    fn handleOf(self: *const Physics, id: u32) ?BodyHandle {
+        // ponytail: linear id->handle scan; a map if you have 1000s of bodies.
+        for (0..self.count) |i| {
+            if (self.bodies[i].alive and self.bodies[i].id == id) return @intCast(i);
+        }
+        return null;
     }
 
     /// Drive a kinematic (moving platform) or dynamic body. Static ignores it.
@@ -231,17 +365,43 @@ pub const Physics = struct {
 
     /// `center` is the capsule center (same convention as body positions).
     pub fn addCharacter(self: *Physics, center: math.Vec3, radius: f32, half_height: f32) !CharacterHandle {
-        if (self.char_count >= max_characters) return error.TooManyCharacters;
+        var free: ?CharacterHandle = null;
+        for (0..self.char_count) |i| {
+            if (!self.char_alive[i]) {
+                free = @intCast(i);
+                break;
+            }
+        }
+        const handle = free orelse blk: {
+            if (self.char_count >= max_characters) return error.TooManyCharacters;
+            self.char_count += 1;
+            break :blk self.char_count - 1;
+        };
+
         const offset = half_height + radius;
         const feet = [_]f32{ center.x, center.y - offset, center.z };
         const id = jolt.Jolt_AddCharacter(&feet, radius, half_height);
-        if (id == std.math.maxInt(u32)) return error.CharacterCreateFailed;
-        const handle = self.char_count;
+        if (id == std.math.maxInt(u32)) {
+            if (free == null) self.char_count -= 1;
+            return error.CharacterCreateFailed;
+        }
         self.char_ids[handle] = id;
         self.char_offsets[handle] = offset;
+        self.char_pos[handle] = center;
+        self.char_radius[handle] = radius;
+        self.char_half_height[handle] = half_height;
+        self.char_layers[handle] = default_layers;
+        self.char_mask[handle] = all_layers;
         self.char_alive[handle] = true;
-        self.char_count += 1;
         return handle;
+    }
+
+    /// Layer membership + collision mask for a character. Same rules as
+    /// `setLayers`: queries use `layers`, movement uses both directions.
+    pub fn setCharacterLayers(self: *Physics, handle: CharacterHandle, layers: u32, mask: u32) void {
+        if (!self.char_alive[handle]) return;
+        self.char_layers[handle] = layers;
+        self.char_mask[handle] = mask;
     }
 
     /// Move once. `velocity` is the full desired velocity *including* gravity —
@@ -252,11 +412,18 @@ pub const Physics = struct {
         const v = [_]f32{ velocity.x, velocity.y, velocity.z };
         var p: [3]f32 = undefined;
         var grounded = false;
-        jolt.Jolt_CharacterMove(self.char_ids[handle], &v, dt, &p, &grounded);
-        return .{
-            .pos = .{ .x = p[0], .y = p[1] + self.char_offsets[handle], .z = p[2] },
-            .grounded = grounded,
-        };
+        jolt.Jolt_CharacterMove(
+            self.char_ids[handle],
+            &v,
+            dt,
+            self.char_layers[handle],
+            self.char_mask[handle],
+            &p,
+            &grounded,
+        );
+        const pos = math.Vec3{ .x = p[0], .y = p[1] + self.char_offsets[handle], .z = p[2] };
+        self.char_pos[handle] = pos;
+        return .{ .pos = pos, .grounded = grounded };
     }
 
     pub fn removeCharacter(self: *Physics, handle: CharacterHandle) void {
@@ -276,6 +443,106 @@ fn defaultColor(body_type: BodyType) math.Vec4 {
         .kinematic => collider_colors.kinematic,
         .dynamic => collider_colors.dynamic,
     };
+}
+
+const CapsuleHit = struct { t: f32, normal: math.Vec3 };
+
+/// Ray vs upright capsule. `dir` is unit length. `center` is the capsule
+/// center; `half_height` is the straight section only (radius excluded).
+fn rayCapsule(
+    origin: math.Vec3,
+    dir: math.Vec3,
+    max_distance: f32,
+    center: math.Vec3,
+    radius: f32,
+    half_height: f32,
+) ?CapsuleHit {
+    const p0 = center.sub(.{ .x = 0, .y = half_height, .z = 0 });
+    const p1 = center.add(.{ .x = 0, .y = half_height, .z = 0 });
+    const axis = p1.sub(p0);
+    const len = @sqrt(axis.dot(axis));
+
+    // Starting inside: report an immediate hit so callers never tunnel.
+    const start = closestOnSegment(origin, p0, p1, len);
+    const start_d = start.sub(origin);
+    if (start_d.dot(start_d) <= radius * radius)
+        return .{ .t = 0, .normal = dir.scale(-1) };
+
+    var best: ?CapsuleHit = null;
+
+    // Cylinder body (skip when the two caps meet: len == 0).
+    if (len > 1e-6) {
+        const a_axis = axis.scale(1.0 / len);
+        const m = origin.sub(p0);
+        const md = m.sub(a_axis.scale(m.dot(a_axis)));
+        const nd = dir.sub(a_axis.scale(dir.dot(a_axis)));
+        const a = nd.dot(nd);
+        if (a > 1e-8) {
+            const b = 2.0 * md.dot(nd);
+            const c = md.dot(md) - radius * radius;
+            const disc = b * b - 4.0 * a * c;
+            if (disc >= 0) {
+                const sq = @sqrt(disc);
+                var t = (-b - sq) / (2.0 * a);
+                if (t < 0) t = (-b + sq) / (2.0 * a);
+                if (t >= 0 and t <= max_distance) {
+                    const hit = origin.add(dir.scale(t));
+                    const axial = hit.sub(p0).dot(a_axis);
+                    if (axial >= 0 and axial <= len) {
+                        best = .{
+                            .t = t,
+                            .normal = hit.sub(p0).sub(a_axis.scale(axial)).normalize(),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // End caps (also handles the zero-half-height sphere case).
+    if (raySphere(origin, dir, max_distance, p0, radius)) |t| {
+        if (best == null or t < best.?.t) {
+            best = .{
+                .t = t,
+                .normal = origin.add(dir.scale(t)).sub(p0).normalize(),
+            };
+        }
+    }
+    if (raySphere(origin, dir, max_distance, p1, radius)) |t| {
+        if (best == null or t < best.?.t) {
+            best = .{
+                .t = t,
+                .normal = origin.add(dir.scale(t)).sub(p1).normalize(),
+            };
+        }
+    }
+    return best;
+}
+
+fn raySphere(
+    origin: math.Vec3,
+    dir: math.Vec3,
+    max_distance: f32,
+    center: math.Vec3,
+    radius: f32,
+) ?f32 {
+    const m = origin.sub(center);
+    const b = m.dot(dir);
+    const c = m.dot(m) - radius * radius;
+    const disc = b * b - c;
+    if (disc < 0) return null;
+    const sq = @sqrt(disc);
+    var t = -b - sq;
+    if (t < 0) t = -b + sq;
+    if (t < 0 or t > max_distance) return null;
+    return t;
+}
+
+fn closestOnSegment(p: math.Vec3, a: math.Vec3, b: math.Vec3, len: f32) math.Vec3 {
+    if (len <= 1e-8) return a;
+    const ab = b.sub(a);
+    const t = std.math.clamp(p.sub(a).dot(ab) / (len * len), 0, 1);
+    return a.add(ab.scale(t));
 }
 
 // Headless end-to-end: static floor + falling box lands at y=1, removal skips.
@@ -361,6 +628,142 @@ test "character falls, lands and reports grounded" {
     // floor top is y=0, so the capsule center rests at half_height + radius.
     try std.testing.expectApproxEqAbs(half_height + radius, state.pos.y, 0.05);
     try std.testing.expectApproxEqAbs(@as(f32, 0), state.pos.x, 0.05);
+}
+
+test "raycast returns point, normal and distance, and respects layers" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+
+    const glass: u32 = 1 << 1;
+    const pane = try sim.addBox(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 }, .static);
+    sim.setLayers(pane, glass, all_layers);
+
+    const hit = sim.raycast(.{ .x = 0, .y = 0, .z = 5 }, .{ .x = 0, .y = 0, .z = -1 }, 10, glass);
+    try std.testing.expect(hit != null);
+    try std.testing.expectEqual(pane, hit.?.body);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), hit.?.distance, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), hit.?.point.z, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), hit.?.normal.z, 1e-4);
+
+    // A query for a different layer misses; 0 means "no layers".
+    try std.testing.expect(sim.raycast(.{ .x = 0, .y = 0, .z = 5 }, .{ .x = 0, .y = 0, .z = -1 }, 10, 1 << 4) == null);
+    try std.testing.expect(sim.raycast(.{ .x = 0, .y = 0, .z = 5 }, .{ .x = 0, .y = 0, .z = -1 }, 10, 0) == null);
+}
+
+test "collision mask can let a body through" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+
+    const floor = try sim.addBox(.{ .x = 0, .y = -1, .z = 0 }, .{ .x = 10, .y = 1, .z = 10 }, .static);
+    sim.setLayers(floor, 1, 1);
+    const ghost = try sim.addSphere(.{ .x = 0, .y = 5, .z = 0 }, 0.5, .dynamic);
+    sim.setLayers(ghost, 2, 2); // floor mask excludes layer 2
+
+    for (0..120) |_| Physics.step(1.0 / 60.0);
+    sim.sync();
+    try std.testing.expect(sim.transform(ghost).pos.y < -5);
+
+    // The same floor still catches a body on its own layer.
+    const ball = try sim.addSphere(.{ .x = 3, .y = 5, .z = 0 }, 0.5, .dynamic);
+    for (0..180) |_| Physics.step(1.0 / 60.0);
+    sim.sync();
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), sim.transform(ball).pos.y, 0.05);
+}
+
+test "character raycast hits the capsule and respects layers" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+
+    const enemy: u32 = 1 << 3;
+    const ch = try sim.addCharacter(.{ .x = 0, .y = 1, .z = 0 }, 0.3, 0.5);
+    sim.setCharacterLayers(ch, enemy, all_layers);
+
+    const hit = sim.raycastCharacters(
+        .{ .x = 0, .y = 1, .z = 5 },
+        .{ .x = 0, .y = 0, .z = -1 },
+        10,
+        enemy,
+    );
+    try std.testing.expect(hit != null);
+    try std.testing.expectEqual(ch, hit.?.character);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.7), hit.?.distance, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), hit.?.point.z, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), hit.?.normal.z, 1e-4);
+
+    try std.testing.expect(sim.raycastCharacters(
+        .{ .x = 0, .y = 1, .z = 5 },
+        .{ .x = 0, .y = 0, .z = -1 },
+        10,
+        1 << 4,
+    ) == null);
+}
+
+test "character slots are reused after removal" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+    const first = try sim.addCharacter(.{ .x = 0, .y = 1, .z = 0 }, 0.3, 0.5);
+    sim.removeCharacter(first);
+    const second = try sim.addCharacter(.{ .x = 0, .y = 1, .z = 0 }, 0.3, 0.5);
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(@as(u32, 1), sim.char_count);
+}
+
+test "character overlaps see rigid bodies and respect layers" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+
+    const hurtbox_layer: u32 = 1 << 4;
+    const ch = try sim.addCharacter(.{ .x = 0, .y = 1, .z = 0 }, 0.3, 0.5);
+    const box = try sim.addBox(.{ .x = 0, .y = 1, .z = 0 }, .{ .x = 0.2, .y = 0.2, .z = 0.2 }, .static);
+    sim.setLayers(box, hurtbox_layer, all_layers);
+
+    var hits: [8]BodyHandle = undefined;
+    const got = sim.characterOverlaps(ch, &hits, hurtbox_layer);
+    try std.testing.expect(got.len == 1);
+    try std.testing.expectEqual(box, got[0]);
+    try std.testing.expectEqual(@as(usize, 0), sim.characterOverlaps(ch, &hits, 1 << 5).len);
+}
+
+test "trigger overlaps can be filtered by layer" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+    const trigger = try sim.addBox(.{ .x = 0, .y = 3, .z = 0 }, .{ .x = 2, .y = 1, .z = 2 }, .static);
+    sim.setTrigger(trigger, true);
+    const ball = try sim.addSphere(.{ .x = 0, .y = 3, .z = 0 }, 0.5, .dynamic);
+    sim.setLayers(ball, 1 << 2, all_layers);
+
+    var hits: [8]BodyHandle = undefined;
+    const got = sim.overlapsMasked(trigger, &hits, 1 << 2);
+    try std.testing.expect(got.len == 1);
+    try std.testing.expectEqual(ball, got[0]);
+    try std.testing.expectEqual(@as(usize, 0), sim.overlapsMasked(trigger, &hits, 1 << 3).len);
+}
+
+test "character collision mask can let it through a floor" {
+    try Physics.init();
+    defer Physics.deinit();
+    var sim: Physics = .{};
+    const floor = try sim.addBox(.{ .x = 0, .y = -1, .z = 0 }, .{ .x = 10, .y = 1, .z = 10 }, .static);
+    sim.setLayers(floor, 1, 1);
+
+    const ch = try sim.addCharacter(.{ .x = 0, .y = 2, .z = 0 }, 0.3, 0.5);
+    sim.setCharacterLayers(ch, 2, 2); // neither side accepts the other
+
+    const dt: f32 = 1.0 / 60.0;
+    var vy: f32 = 0;
+    var state: Character = undefined;
+    for (0..120) |_| {
+        vy -= 9.81 * dt;
+        state = sim.moveCharacter(ch, .{ .x = 0, .y = vy, .z = 0 }, dt);
+    }
+    try std.testing.expect(state.pos.y < -5);
+    try std.testing.expect(state.grounded == false);
 }
 
 test "trigger reports overlaps but lets bodies pass" {

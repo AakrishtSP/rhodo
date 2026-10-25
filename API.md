@@ -64,9 +64,15 @@ inside the render pass (before `endFrame`); debug lines flush automatically at
   One directional only; point lights + fog arrive with atmosphere work.
 - `Camera` (`src/camera.zig`) — `pos`, `yaw`/`pitch` (radians), `pitch_min`/
   `pitch_max` (clamped by `addLook`), `fov_y`, `near=0.1`, `far=100`.
-  `forward()`, `view()`, `projection(aspect)`, `addLook(input, dt, .{})`
-  (mouse while the keyboard device is live + right stick), `orbit(target,
-  distance)` (places the camera behind its look direction, aimed at target).
+  `forward()`, `right()`, `view()`, `projection(aspect)`,
+  `addLook(input, dt, .{})` (mouse while the keyboard device is live + right
+  stick), `orbit(target, distance)` (places the camera behind its look
+  direction, aimed at target), `orbitOffset(target, distance, right, up)`
+  (over-the-shoulder boom; orientation stays yaw/pitch). Clamp the boom with a
+  glass-only `Physics.raycast` from the target to the desired position.
+- `screenSize() Vec2` — current swapchain size in pixels.
+- `worldToScreen(pos) ?Vec2` — world point to top-left pixel coordinates; null
+  behind the camera or outside depth. Use it to place ImGui cell labels.
 - `sim.transform(handle)` — last synced `Transform = { pos, rot(quat), scale }`
   (scale = shape bounds).
 - `loadTexture(path) !TextureHandle`, `drawSprite(tex, transform: Mat4)` —
@@ -97,8 +103,9 @@ World space. No-op when empty.
 
 ## Physics (`src/physics.zig`, Jolt v5.6 via `vendor/jolt/jolt_shim.h`)
 
-- `Physics.init/deinit` — 2-layer world (non-moving/moving), 1024 bodies,
-  thread-pool job system, 10MB temp allocator.
+- `Physics.init/deinit` — 1024 bodies, thread-pool job system, 10MB temp
+  allocator. Jolt still uses two broadphase motion layers (non-moving/moving);
+  per-body `layers`/`mask` add fine-grained filtering on top.
 - `addBox(pos, half, body_type)`, `addSphere(pos, radius)`,
   `addCapsule(pos, radius, half_height)`, `addCylinder(pos, radius,
   half_height)` — all take `body_type` last. Capsules/cylinders are upright
@@ -120,6 +127,28 @@ World space. No-op when empty.
   intersects this one (self excluded). This is how triggers detect what is
   inside them; solid bodies are included, so the game filters by its own
   vocabulary. Cheap shape query, call once per trigger per frame after `step`.
+  `overlapsMasked(handle, out, layers)` does the same but only bodies whose
+  `layers` intersect `layers`.
+- `overlaps` currently sees only rigid bodies, not `CharacterVirtual`s.
+- `setLayers(handle, layers: u32, mask: u32)` — layer membership + collision
+  mask. `layers` is the set of layers the body belongs to; `mask` is the set it
+  collides with. Bodies collide only when both agree:
+  `(a.layers & b.mask) != 0 and (b.layers & a.mask) != 0`. Defaults are layer
+  bit 0 and all masks (`rhodo.default_layers`, `rhodo.all_layers`). Queries use
+  `layers` only, so `mask` never hides a body from a ray.
+- `raycast(origin, dir, max_distance, layers) ?Physics.RayHit` — closest body
+  hit. `RayHit = { body, point, normal, distance }`; `dir` need not be
+  normalized. `layers` selects bodies by their `layers` bits, **not** their
+  collision mask. Aim with your glass bit; for the laser start at the inner
+  cell face plus epsilon so it doesn't hit its own pane. `layers = 0` misses.
+- `raycastCharacters(origin, dir, max_distance, layers) ?Physics.CharacterHit` —
+  ray/capsule test against `CharacterVirtual`s (they are not in Jolt's
+  broadphase). Same layer semantics; `CharacterHit = { character, point,
+  normal, distance }`. Pick the nearer of a body hit and a character hit for
+  line-of-fire checks.
+- `characterOverlaps(character, out: []BodyHandle, layers) []BodyHandle` —
+  bodies intersecting a character's capsule. Use this (not `overlaps`) for
+  hurtboxes/trigger volumes around player or enemies.
 - `setColor(handle, Vec4)` — collider **gizmo** color only (never the sim).
   Defaults: static grey, kinematic blue, dynamic green, trigger yellow
   (`rhodo.collider_colors`). Hitbox/hurtbox = just colors you pick, e.g. red
@@ -133,7 +162,8 @@ World space. No-op when empty.
   color, using the transforms from the last `sync()`. Colliders are **not** rendered
   by default: a body with no mesh is invisible until this is on. A mesh with
   no body is simply a draw call with your own `Mat4`. The two are independent.
-  `sim.bodies[i]` is public (`id, kind, scale, normal, color, alive`).
+  `sim.bodies[i]` is public (`id, kind, scale, normal, color, layers, mask,
+  alive`).
   Characters aren't bodies: draw theirs with `renderer.drawCapsule(pos, axis,
   radius, half_height, color)`.
 
@@ -157,6 +187,9 @@ sim.removeCharacter(ch);
 - Capsule center is the input/output position (same convention as bodies);
   the shim converts to Jolt's feet-at-origin shape internally.
 - Up to 8 characters per `Physics`; no character-vs-character collision.
+- `setCharacterLayers(handle, layers, mask)` sets query bits and the character's
+  collision layer/mask (same two-way rule as bodies). Defaults are layer bit 0
+  and all masks; a character only collides with bodies that accept each other.
 
 Game objects are per-type structs over these registries (e.g. a `Prop`
 `{body, model: ?Model}` with a `spawn` constructor), not engine entities —
@@ -231,7 +264,10 @@ per-frame `beginUi`/`endUi`, raw SDL event feed in `pollEvent`, and
 `Begin/End`, `Text` (plain string; format in Zig), `Button`, `Checkbox`,
 `SliderFloat`, `SameLine`, `Separator`, `SetNextWindowPos/Size`,
 `WantCaptureMouse/Keyboard` (gate game input while interacting), `Framerate`.
-Reuses shaders[0]'s render pass; backend-owned descriptor pool.
+`TextAt(x, y, color, str)` and `Line2D(x0, y0, x1, y1, color, thickness)` draw
+on the foreground draw list (screen pixels, over windows); `color` is ImGui's
+packed `0xAABBGGRR` (low byte red). Reuses shaders[0]'s render pass;
+backend-owned descriptor pool.
 
 ## Shaders
 
@@ -244,9 +280,14 @@ before reaching the driver (`error.InvalidSpirv`).
 
 ## Math (`src/math.zig`)
 
-`Vec3` (`add/sub/scale/cross/dot/normalize/rotateByQuat`), `Vec4`, `Mat4`
+`Vec2`, `Vec3` (`add/sub/scale/cross/dot/normalize/rotateByQuat`), `Vec4`, `Mat4`
 column-major (`identity/mul/transpose/perspective/lookAt/rotationY/
-orthographic/translate/scale/fromTransform/orientedBoxAabb`).
+orthographic/translate/scale/fromTransform/orientedBoxAabb`). `Transform` also
+has `offset(local)` (position + rotation, ignores scale), `point(local)` (full
+T*R*S) and `direction(local)` (rotation only) for local-to-world conversion.
+Use `offset` for hitbox/muzzle/weak-spot offsets from `Physics.transform`,
+whose scale is shape bounds rather than an entity scale — keep offsets local
+to the entity and convert at the boundary.
 
 ## Mesh loading (`src/renderer/mesh.zig`)
 

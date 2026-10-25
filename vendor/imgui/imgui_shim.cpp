@@ -106,6 +106,14 @@ void Imgui_SetNextWindowSize(float w, float h) {
     ImGui::SetNextWindowSize(ImVec2(w, h));
 }
 
+void Imgui_TextAt(float x, float y, uint32_t color, const char *text) {
+    ImGui::GetForegroundDrawList()->AddText(ImVec2(x, y), color, text);
+}
+
+void Imgui_Line2D(float x0, float y0, float x1, float y1, uint32_t color, float thickness) {
+    ImGui::GetForegroundDrawList()->AddLine(ImVec2(x0, y0), ImVec2(x1, y1), color, thickness);
+}
+
 bool Imgui_WantCaptureMouse(void) {
     return ImGui::GetIO().WantCaptureMouse;
 }

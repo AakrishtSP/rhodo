@@ -363,6 +363,21 @@ pub const Renderer = struct {
         self.camera = cam;
     }
 
+    /// Current framebuffer size in pixels (matches the swapchain).
+    pub fn screenSize(self: *Renderer) math.Vec2 {
+        return .{
+            .x = @floatFromInt(self.swapchain.extent.width),
+            .y = @floatFromInt(self.swapchain.extent.height),
+        };
+    }
+
+    /// World point -> top-left pixel coordinates. Null when behind the camera
+    /// or outside the depth range; off-screen x/y are returned for caller culling.
+    pub fn worldToScreen(self: *Renderer, pos: math.Vec3) ?math.Vec2 {
+        const size = self.screenSize();
+        return math.Mat4.projectPoint(self.viewProj(), pos, size.x, size.y);
+    }
+
     // Bind the scene sun. Direction is normalized, ambient clamped 0..1.
     pub fn setLight(self: *Renderer, dir: math.Vec3, ambient: f32) void {
         const len = @sqrt(dir.dot(dir));

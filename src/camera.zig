@@ -27,6 +27,11 @@ pub const Camera = struct {
         };
     }
 
+    /// World-space right (yaw only, so shoulder offsets do not tilt with pitch).
+    pub fn right(self: Camera) math.Vec3 {
+        return .{ .x = @cos(self.yaw), .y = 0, .z = @sin(self.yaw) };
+    }
+
     /// Sensitivities for `addLook`: mouse radians/pixel, stick radians/second.
     pub const Look = struct {
         mouse: f32 = 0.0025,
@@ -49,6 +54,17 @@ pub const Camera = struct {
     /// `target`. Call after changing yaw/pitch (and again after the target moves).
     pub fn orbit(self: *Camera, target: math.Vec3, distance: f32) void {
         self.pos = target.sub(self.forward().scale(distance));
+    }
+
+    /// Over-the-shoulder boom: behind `target`, plus right/up offsets. The
+    /// orientation stays yaw/pitch, so the reticle looks parallel through the
+    /// shoulder rather than re-aiming at the target. Clamp `distance` yourself
+    /// with a glass-only `Physics.raycast` from target to the desired position.
+    pub fn orbitOffset(self: *Camera, target: math.Vec3, distance: f32, right_offset: f32, up_offset: f32) void {
+        self.pos = target
+            .sub(self.forward().scale(distance))
+            .add(self.right().scale(right_offset))
+            .add(.{ .x = 0, .y = up_offset, .z = 0 });
     }
 
     pub fn view(self: Camera) math.Mat4 {
@@ -84,6 +100,17 @@ test "orbit keeps the target in front at the requested distance" {
     const d = target.sub(cam.pos);
     try std.testing.expectApproxEqAbs(@as(f32, 5), @sqrt(d.dot(d)), 1e-5);
     try std.testing.expectApproxEqAbs(cam.forward().x, d.normalize().x, 1e-5);
+}
+
+test "orbitOffset adds shoulder and height without changing aim" {
+    var cam: Camera = .{};
+    const target = math.Vec3{ .x = 0, .y = 1.5, .z = 0 };
+    cam.orbitOffset(target, 3.5, 0.6, 1.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), cam.pos.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), cam.pos.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.5), cam.pos.z, 1e-5);
+    // still looking straight down -Z, not turned toward the target
+    try std.testing.expectApproxEqAbs(@as(f32, -1), cam.forward().z, 1e-5);
 }
 
 test "addLook gates the mouse and clamps pitch" {
